@@ -1,0 +1,164 @@
+"""Integration tests against live HF API.
+
+These tests require HF_TOKEN and HF_NAMESPACE env vars.
+Run with: uv run pytest -m integration
+Skip with: uv run pytest -m 'not integration'
+"""
+
+from __future__ import annotations
+
+import os
+import hashlib
+import time
+
+import pytest
+
+from hugbucket.config import Config
+from hugbucket.bridge import Bridge
+
+
+@pytest.fixture
+def config(hf_token: str) -> Config:
+    return Config(
+        hf_token=hf_token,
+        hf_namespace=os.environ.get("HF_NAMESPACE", "ninavacabsa"),
+    )
+
+
+@pytest.fixture
+async def bridge(config: Config):
+    b = Bridge(config=config)
+    yield b
+    await b.close()
+
+
+# Unique bucket name per test run to avoid collisions
+TEST_BUCKET = f"test-{int(time.time()) % 100000}"
+
+
+@pytest.mark.integration
+class TestBucketOperations:
+    """Test bucket CRUD against live HF API."""
+
+    async def test_create_and_delete_bucket(self, bridge: Bridge) -> None:
+        bucket_name = f"pytest-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+            info = await bridge.head_bucket(bucket_name)
+            assert info is not None
+        finally:
+            await bridge.delete_bucket(bucket_name)
+
+    async def test_list_buckets(self, bridge: Bridge) -> None:
+        buckets = await bridge.list_buckets()
+        assert isinstance(buckets, list)
+
+
+@pytest.mark.integration
+class TestUploadDownload:
+    """Test file upload/download with integrity verification."""
+
+    async def test_small_file_roundtrip(self, bridge: Bridge) -> None:
+        """Upload and download a 10KB file, verify byte-identical."""
+        bucket_name = f"pytest-rt-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            data = os.urandom(10 * 1024)
+            key = "test-small.bin"
+
+            result = await bridge.put_object(bucket_name, key, data)
+            assert "ETag" in result
+
+            downloaded = await bridge.get_object(bucket_name, key)
+            assert downloaded is not None
+            assert len(downloaded) == len(data)
+            assert (
+                hashlib.sha256(downloaded).hexdigest()
+                == hashlib.sha256(data).hexdigest()
+            )
+
+            # Clean up file
+            await bridge.delete_object(bucket_name, key)
+        finally:
+            await bridge.delete_bucket(bucket_name)
+
+    async def test_multi_chunk_file_roundtrip(self, bridge: Bridge) -> None:
+        """Upload and download a 200KB file (multiple CDC chunks)."""
+        bucket_name = f"pytest-mc-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            data = os.urandom(200 * 1024)
+            key = "test-multi-chunk.bin"
+
+            result = await bridge.put_object(bucket_name, key, data)
+            assert "ETag" in result
+
+            downloaded = await bridge.get_object(bucket_name, key)
+            assert downloaded is not None
+            assert downloaded == data
+
+            await bridge.delete_object(bucket_name, key)
+        finally:
+            await bridge.delete_bucket(bucket_name)
+
+    async def test_head_object(self, bridge: Bridge) -> None:
+        """Test object metadata retrieval."""
+        bucket_name = f"pytest-ho-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            data = os.urandom(5 * 1024)
+            key = "test-head.bin"
+            await bridge.put_object(bucket_name, key, data)
+
+            info = await bridge.head_object(bucket_name, key)
+            assert info is not None
+            assert info.path == key
+            assert info.size == len(data)
+
+            await bridge.delete_object(bucket_name, key)
+        finally:
+            await bridge.delete_bucket(bucket_name)
+
+    async def test_list_objects(self, bridge: Bridge) -> None:
+        """Test object listing with prefix."""
+        bucket_name = f"pytest-lo-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            # Upload two files
+            await bridge.put_object(bucket_name, "dir/a.txt", b"aaa")
+            await bridge.put_object(bucket_name, "dir/b.txt", b"bbb")
+            await bridge.put_object(bucket_name, "other.txt", b"other")
+
+            # List with prefix
+            result = await bridge.list_objects(bucket_name, prefix="dir/")
+            contents = result["contents"]
+            assert len(contents) >= 2
+            keys = {f.path for f in contents}
+            assert "dir/a.txt" in keys
+            assert "dir/b.txt" in keys
+
+            # List with delimiter
+            result = await bridge.list_objects(bucket_name, delimiter="/")
+            assert "dir/" in result["common_prefixes"]
+
+            # Clean up
+            await bridge.delete_object(bucket_name, "dir/a.txt")
+            await bridge.delete_object(bucket_name, "dir/b.txt")
+            await bridge.delete_object(bucket_name, "other.txt")
+        finally:
+            await bridge.delete_bucket(bucket_name)
+
+    async def test_delete_nonexistent_returns_none(self, bridge: Bridge) -> None:
+        """head_object on missing key returns None."""
+        bucket_name = f"pytest-dn-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+            info = await bridge.head_object(bucket_name, "does-not-exist.txt")
+            # Should be None or empty list
+            assert info is None or (isinstance(info, list) and len(info) == 0)
+        finally:
+            await bridge.delete_bucket(bucket_name)

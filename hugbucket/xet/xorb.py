@@ -53,21 +53,34 @@ def _byte_group4_encode(data: bytes) -> bytes:
 
     [A1,A2,A3,A4, B1,B2,B3,B4, ...] ->
     [A1,B1,..., A2,B2,..., A3,B3,..., A4,B4,...]
+
+    Each of the 4 "lanes" collects every byte at that position within
+    the 4-byte groups.  The first `remainder` lanes have one extra element
+    (from the partial trailing group).
     """
     n = len(data)
+    if n == 0:
+        return data
     full_groups = n // 4
     remainder = n % 4
 
+    # Compute the starting offset of each lane in the output.
+    # Lane b has (full_groups + 1) elements if b < remainder, else full_groups.
+    lane_offsets: list[int] = []
+    off = 0
+    for b in range(4):
+        lane_offsets.append(off)
+        off += full_groups + (1 if b < remainder else 0)
+
     result = bytearray(n)
-    group_size = full_groups + (1 if remainder > 0 else 0)
 
     for g in range(full_groups):
         for b in range(4):
-            result[b * group_size + g] = data[g * 4 + b]
+            result[lane_offsets[b] + g] = data[g * 4 + b]
 
-    # Handle remaining bytes (< 4)
+    # Handle remaining bytes (< 4) from the partial trailing group
     for r in range(remainder):
-        result[r * group_size + full_groups] = data[full_groups * 4 + r]
+        result[lane_offsets[r] + full_groups] = data[full_groups * 4 + r]
 
     return bytes(result)
 
@@ -75,18 +88,25 @@ def _byte_group4_encode(data: bytes) -> bytes:
 def _byte_group4_decode(data: bytes, original_size: int) -> bytes:
     """Reverse of ByteGrouping4 encoding."""
     n = original_size
+    if n == 0:
+        return b""
     full_groups = n // 4
     remainder = n % 4
 
+    lane_offsets: list[int] = []
+    off = 0
+    for b in range(4):
+        lane_offsets.append(off)
+        off += full_groups + (1 if b < remainder else 0)
+
     result = bytearray(n)
-    group_size = full_groups + (1 if remainder > 0 else 0)
 
     for g in range(full_groups):
         for b in range(4):
-            result[g * 4 + b] = data[b * group_size + g]
+            result[g * 4 + b] = data[lane_offsets[b] + g]
 
     for r in range(remainder):
-        result[full_groups * 4 + r] = data[r * group_size + full_groups]
+        result[full_groups * 4 + r] = data[lane_offsets[r] + full_groups]
 
     return bytes(result)
 
