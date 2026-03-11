@@ -28,9 +28,6 @@ def main() -> None:
         "--hf-token", default="", help="HF API token (or set HF_TOKEN env)"
     )
     parser.add_argument(
-        "--hf-namespace", default="", help="HF namespace (or set HF_NAMESPACE env)"
-    )
-    parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable debug logging"
     )
     args = parser.parse_args()
@@ -46,8 +43,6 @@ def main() -> None:
     )
     if args.hf_token:
         config.hf_token = args.hf_token
-    if args.hf_namespace:
-        config.hf_namespace = args.hf_namespace
 
     if not config.hf_token:
         logging.error("No HF token provided. Set HF_TOKEN env or pass --hf-token.")
@@ -60,6 +55,15 @@ def main() -> None:
     handler.setup_routes(app)
 
     async def on_startup(app: web.Application) -> None:
+        # Auto-resolve HF namespace from token if not set
+        if not config.hf_namespace:
+            try:
+                config.hf_namespace = await bridge.hub.whoami()
+                logging.info(f"  Resolved HF namespace: {config.hf_namespace}")
+            except Exception as e:
+                logging.error(f"Failed to resolve HF namespace from token: {e}")
+                sys.exit(1)
+
         logging.info(
             f"HugBucket S3 gateway starting on http://{config.host}:{config.port}"
         )

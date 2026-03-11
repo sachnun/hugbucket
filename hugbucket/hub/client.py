@@ -73,6 +73,17 @@ class HubClient:
     def _api_url(self, path: str) -> str:
         return f"{self.config.hf_endpoint}{path}"
 
+    # ---- Auth / identity ----
+
+    async def whoami(self) -> str:
+        """Get username associated with the HF token via /api/whoami-v2."""
+        session = await self._ensure_session()
+        url = self._api_url("/api/whoami-v2")
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            return data["name"]
+
     # ---- Bucket CRUD ----
 
     async def create_bucket(

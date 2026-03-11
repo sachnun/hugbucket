@@ -26,9 +26,8 @@ class Config:
     )
 
     # HF namespace (user or org that owns the buckets)
-    hf_namespace: str = field(
-        default_factory=lambda: os.environ.get("HF_NAMESPACE", "me")
-    )
+    # Resolved automatically from HF token via /api/whoami-v2 at startup
+    hf_namespace: str = ""
 
     # Xet CDC settings
     xet_chunk_target: int = 65536  # 64 KiB

@@ -60,11 +60,10 @@ class Bridge:
         await self.cas.close()
 
     def _bucket_id(self, bucket_name: str) -> str:
-        """Convert S3 bucket name to HF bucket_id."""
-        ns = self.config.hf_namespace
-        if ns == "me" or "/" in bucket_name:
+        """Convert S3 bucket name to HF bucket_id (namespace/name)."""
+        if "/" in bucket_name:
             return bucket_name
-        return f"{ns}/{bucket_name}"
+        return f"{self.config.hf_namespace}/{bucket_name}"
 
     # ---- Bucket operations ----
 
