@@ -1,0 +1,349 @@
+"""Async HTTP client for HF Hub Bucket API endpoints."""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from urllib.parse import quote
+
+import aiohttp
+
+from hugbucket.config import Config
+
+logger = logging.getLogger(__name__)
+
+# Batch sizes matching huggingface_hub
+BATCH_ADD_CHUNK_SIZE = 100
+BATCH_DELETE_CHUNK_SIZE = 1000
+PATHS_INFO_BATCH_SIZE = 1000
+
+
+@dataclass
+class BucketInfo:
+    id: str
+    private: bool
+    created_at: str
+    size: int
+    total_files: int
+
+
+@dataclass
+class BucketFile:
+    type: str  # "file" or "directory"
+    path: str
+    size: int = 0
+    xet_hash: str = ""
+    mtime: str = ""
+    uploaded_at: str = ""
+
+
+@dataclass
+class XetConnectionInfo:
+    cas_url: str
+    access_token: str
+    token_expiration: int  # unix epoch
+
+
+@dataclass
+class HubClient:
+    """Async client for HF Hub Bucket API."""
+
+    config: Config
+    _session: aiohttp.ClientSession | None = field(default=None, repr=False)
+
+    def _headers(self) -> dict[str, str]:
+        h = {"User-Agent": "hugbucket/0.1.0"}
+        if self.config.hf_token:
+            h["Authorization"] = f"Bearer {self.config.hf_token}"
+        return h
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers=self._headers(),
+                raise_for_status=False,
+            )
+        return self._session
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    def _api_url(self, path: str) -> str:
+        return f"{self.config.hf_endpoint}{path}"
+
+    # ---- Bucket CRUD ----
+
+    async def create_bucket(
+        self, name: str, *, private: bool = False, exist_ok: bool = True
+    ) -> str:
+        """Create a bucket. Returns the bucket URL."""
+        session = await self._ensure_session()
+        ns = self.config.hf_namespace
+        url = self._api_url(f"/api/buckets/{ns}/{name}")
+        body: dict = {}
+        if private:
+            body["private"] = True
+
+        async with session.post(url, json=body) as resp:
+            if resp.status == 409 and exist_ok:
+                return f"{self.config.hf_endpoint}/buckets/{ns}/{name}"
+            resp.raise_for_status()
+            data = await resp.json()
+            return data.get("url", "")
+
+    async def get_bucket_info(self, bucket_id: str) -> BucketInfo:
+        """Get bucket info. bucket_id = 'namespace/name'."""
+        session = await self._ensure_session()
+        url = self._api_url(f"/api/buckets/{bucket_id}")
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            d = await resp.json()
+            return BucketInfo(
+                id=d["id"],
+                private=d["private"],
+                created_at=d.get("createdAt", ""),
+                size=d.get("size", 0),
+                total_files=d.get("totalFiles", 0),
+            )
+
+    async def list_buckets(self, namespace: str | None = None) -> list[BucketInfo]:
+        """List all buckets for the namespace."""
+        session = await self._ensure_session()
+        ns = namespace or self.config.hf_namespace
+        url = self._api_url(f"/api/buckets/{ns}")
+        buckets: list[BucketInfo] = []
+
+        while url:
+            async with session.get(url) as resp:
+                resp.raise_for_status()
+                items = await resp.json()
+                for d in items:
+                    buckets.append(
+                        BucketInfo(
+                            id=d["id"],
+                            private=d["private"],
+                            created_at=d.get("createdAt", ""),
+                            size=d.get("size", 0),
+                            total_files=d.get("totalFiles", 0),
+                        )
+                    )
+                # Follow pagination via Link header
+                url = self._next_link(resp)
+
+        return buckets
+
+    async def delete_bucket(self, bucket_id: str, *, missing_ok: bool = True) -> None:
+        """Delete a bucket."""
+        session = await self._ensure_session()
+        url = self._api_url(f"/api/buckets/{bucket_id}")
+        async with session.delete(url) as resp:
+            if resp.status == 404 and missing_ok:
+                return
+            resp.raise_for_status()
+
+    # ---- File listing ----
+
+    async def list_bucket_tree(
+        self,
+        bucket_id: str,
+        prefix: str = "",
+        recursive: bool = False,
+    ) -> list[BucketFile]:
+        """List files/dirs in a bucket."""
+        session = await self._ensure_session()
+
+        path = f"/api/buckets/{bucket_id}/tree"
+        if prefix:
+            path += f"/{quote(prefix, safe='')}"
+
+        url = self._api_url(path)
+        params = {}
+        if recursive:
+            params["recursive"] = "true"
+
+        files: list[BucketFile] = []
+        while url:
+            async with session.get(url, params=params) as resp:
+                resp.raise_for_status()
+                items = await resp.json()
+                for d in items:
+                    files.append(
+                        BucketFile(
+                            type=d["type"],
+                            path=d["path"],
+                            size=d.get("size", 0),
+                            xet_hash=d.get("xetHash", ""),
+                            mtime=d.get("mtime", ""),
+                            uploaded_at=d.get("uploadedAt", ""),
+                        )
+                    )
+                url = self._next_link(resp)
+                params = {}  # params already in the next URL
+
+        return files
+
+    async def get_paths_info(
+        self, bucket_id: str, paths: list[str]
+    ) -> list[BucketFile]:
+        """Batch get file info for specific paths."""
+        session = await self._ensure_session()
+        url = self._api_url(f"/api/buckets/{bucket_id}/paths-info")
+        all_files: list[BucketFile] = []
+
+        for i in range(0, len(paths), PATHS_INFO_BATCH_SIZE):
+            batch = paths[i : i + PATHS_INFO_BATCH_SIZE]
+            async with session.post(url, json={"paths": batch}) as resp:
+                resp.raise_for_status()
+                items = await resp.json()
+                for d in items:
+                    all_files.append(
+                        BucketFile(
+                            type=d["type"],
+                            path=d["path"],
+                            size=d.get("size", 0),
+                            xet_hash=d.get("xetHash", ""),
+                            mtime=d.get("mtime", ""),
+                            uploaded_at=d.get("uploadedAt", ""),
+                        )
+                    )
+
+        return all_files
+
+    # ---- Batch add/delete ----
+
+    async def batch_files(
+        self,
+        bucket_id: str,
+        add: list[dict] | None = None,
+        delete: list[str] | None = None,
+    ) -> None:
+        """Batch add/delete files via NDJSON.
+
+        add: list of {"path": ..., "xetHash": ..., "mtime": epoch_ms, "contentType": ...}
+        delete: list of paths to delete
+        """
+        session = await self._ensure_session()
+        url = self._api_url(f"/api/buckets/{bucket_id}/batch")
+
+        # Process adds in chunks of 100
+        if add:
+            for i in range(0, len(add), BATCH_ADD_CHUNK_SIZE):
+                batch = add[i : i + BATCH_ADD_CHUNK_SIZE]
+                await self._send_ndjson_batch(session, url, batch, [])
+
+        # Process deletes in chunks of 1000
+        if delete:
+            for i in range(0, len(delete), BATCH_DELETE_CHUNK_SIZE):
+                batch = delete[i : i + BATCH_DELETE_CHUNK_SIZE]
+                await self._send_ndjson_batch(session, url, [], batch)
+
+    async def _send_ndjson_batch(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        adds: list[dict],
+        deletes: list[str],
+    ) -> None:
+        import json
+
+        lines: list[str] = []
+        for a in adds:
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "addFile",
+                        "path": a["path"],
+                        "xetHash": a["xetHash"],
+                        "mtime": a["mtime"],
+                        "contentType": a.get("contentType", "application/octet-stream"),
+                    }
+                )
+            )
+        for d in deletes:
+            lines.append(json.dumps({"type": "deleteFile", "path": d}))
+
+        body = "\n".join(lines)
+        async with session.post(
+            url,
+            data=body.encode(),
+            headers={"Content-Type": "application/x-ndjson"},
+        ) as resp:
+            resp.raise_for_status()
+
+    # ---- Xet tokens ----
+
+    async def get_xet_write_token(self, bucket_id: str) -> XetConnectionInfo:
+        """Get Xet CAS write credentials."""
+        return await self._get_xet_token(bucket_id, "write")
+
+    async def get_xet_read_token(self, bucket_id: str) -> XetConnectionInfo:
+        """Get Xet CAS read credentials."""
+        return await self._get_xet_token(bucket_id, "read")
+
+    async def _get_xet_token(
+        self, bucket_id: str, token_type: str
+    ) -> XetConnectionInfo:
+        session = await self._ensure_session()
+        url = self._api_url(f"/api/buckets/{bucket_id}/xet-{token_type}-token")
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            return XetConnectionInfo(
+                cas_url=resp.headers["X-Xet-Cas-Url"],
+                access_token=resp.headers["X-Xet-Access-Token"],
+                token_expiration=int(resp.headers["X-Xet-Token-Expiration"]),
+            )
+
+    # ---- File metadata (HEAD) ----
+
+    async def head_file(self, bucket_id: str, path: str) -> BucketFile | None:
+        """Get single file metadata via HEAD request."""
+        session = await self._ensure_session()
+        encoded = quote(path, safe="")
+        url = self._api_url(f"/buckets/{bucket_id}/resolve/{encoded}")
+        async with session.head(url, allow_redirects=False) as resp:
+            if resp.status == 404:
+                return None
+            # Follow relative redirects only
+            if resp.status in (301, 302, 307, 308):
+                location = resp.headers.get("Location", "")
+                if location.startswith("/"):
+                    return await self._head_follow(session, location)
+            resp.raise_for_status()
+            return BucketFile(
+                type="file",
+                path=path,
+                size=int(resp.headers.get("Content-Length", 0)),
+                xet_hash=resp.headers.get("X-Xet-Hash", ""),
+            )
+
+    async def _head_follow(
+        self, session: aiohttp.ClientSession, path: str
+    ) -> BucketFile | None:
+        url = self._api_url(path)
+        async with session.head(url, allow_redirects=False) as resp:
+            if resp.status == 404:
+                return None
+            resp.raise_for_status()
+            return BucketFile(
+                type="file",
+                path=path.split("/resolve/")[-1] if "/resolve/" in path else path,
+                size=int(resp.headers.get("Content-Length", 0)),
+                xet_hash=resp.headers.get("X-Xet-Hash", ""),
+            )
+
+    # ---- Helpers ----
+
+    @staticmethod
+    def _next_link(resp: aiohttp.ClientResponse) -> str | None:
+        """Parse GitHub-style Link header for pagination."""
+        link = resp.headers.get("Link", "")
+        if not link:
+            return None
+        for part in link.split(","):
+            part = part.strip()
+            if 'rel="next"' in part:
+                url = part.split(";")[0].strip().strip("<>")
+                return url
+        return None
