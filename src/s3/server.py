@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 XML_CONTENT = "application/xml"
 
+# Paths commonly requested by browsers/crawlers that are not valid S3 operations.
+# Reject these early to avoid unnecessary API calls to HuggingFace.
+_IGNORED_PATHS = {"favicon.ico", "robots.txt", "sitemap.xml", ".well-known"}
+
 
 def _request_id() -> str:
     return uuid.uuid4().hex[:16].upper()
@@ -95,6 +99,15 @@ class S3Handler:
 
         if not bucket:
             return await self.handle_list_buckets(request)
+
+        # Reject browser/crawler paths that are not valid S3 bucket names
+        if not key and bucket in _IGNORED_PATHS:
+            return _s3_error(
+                404,
+                "NoSuchBucket",
+                f"The specified bucket does not exist.",
+                resource=f"/{bucket}",
+            )
 
         # Bucket-level operations (no key)
         if not key:
