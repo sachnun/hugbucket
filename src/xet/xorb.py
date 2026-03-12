@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 import lz4.block
+import lz4.frame
 
 
 class CompressionType(IntEnum):
@@ -28,6 +29,9 @@ class CompressionType(IntEnum):
 XORB_VERSION = 0
 XORB_MAX_BYTES = 64 * 1024 * 1024  # 64 MiB
 HEADER_SIZE = 8
+
+# LZ4 Frame format magic number (little-endian bytes of 0x184D2204)
+LZ4_FRAME_MAGIC = b"\x04\x22\x4d\x18"
 
 
 @dataclass
@@ -114,11 +118,12 @@ def _byte_group4_decode(data: bytes, original_size: int) -> bytes:
 def _compress_chunk(data: bytes) -> tuple[bytes, CompressionType]:
     """Compress a chunk, trying LZ4 first. Returns (compressed_data, type).
 
-    Strategy: try LZ4 first. If it doesn't shrink, store uncompressed.
+    Strategy: try LZ4 frame compression first (matching xet-core's format).
+    If it doesn't shrink, store uncompressed.
     We skip ByteGrouping4+LZ4 for simplicity (it's an optimization for
     structured numeric data).
     """
-    compressed = lz4.block.compress(data, store_size=False)
+    compressed = lz4.frame.compress(data)
     if len(compressed) < len(data):
         return compressed, CompressionType.LZ4
     return data, CompressionType.NONE
@@ -129,13 +134,25 @@ def _decompress_chunk(
     compression: CompressionType,
     uncompressed_size: int,
 ) -> bytes:
-    """Decompress a chunk based on compression type."""
+    """Decompress a chunk based on compression type.
+
+    Supports both LZ4 Frame format (used by xet-core / huggingface_hub)
+    and LZ4 Block format (legacy hugbucket uploads) by detecting the
+    LZ4 Frame magic bytes.
+    """
     if compression == CompressionType.NONE:
         return data
     elif compression == CompressionType.LZ4:
+        if data[:4] == LZ4_FRAME_MAGIC:
+            return lz4.frame.decompress(data)
         return lz4.block.decompress(data, uncompressed_size=uncompressed_size)
     elif compression == CompressionType.BYTE_GROUPING4_LZ4:
-        decompressed = lz4.block.decompress(data, uncompressed_size=uncompressed_size)
+        if data[:4] == LZ4_FRAME_MAGIC:
+            decompressed = lz4.frame.decompress(data)
+        else:
+            decompressed = lz4.block.decompress(
+                data, uncompressed_size=uncompressed_size
+            )
         return _byte_group4_decode(decompressed, uncompressed_size)
     else:
         raise ValueError(f"Unknown compression type: {compression}")
