@@ -11,6 +11,7 @@ from aiohttp import web
 
 from hugbucket.config import Config
 from hugbucket.bridge import Bridge
+from hugbucket.s3.auth import s3_auth_middleware
 from hugbucket.s3.server import S3Handler
 
 
@@ -51,7 +52,11 @@ def main() -> None:
     bridge = Bridge(config=config)
     handler = S3Handler(bridge)
 
-    app = web.Application(client_max_size=1024 * 1024 * 1024)  # 1 GiB max upload
+    app = web.Application(
+        client_max_size=1024 * 1024 * 1024,  # 1 GiB max upload
+        middlewares=[s3_auth_middleware],
+    )
+    app["config"] = config
     handler.setup_routes(app)
 
     async def on_startup(app: web.Application) -> None:
