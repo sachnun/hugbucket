@@ -4,6 +4,8 @@ S3-compatible gateway for Hugging Face Storage Buckets.
 
 ## Quick Start
 
+You'll need [Docker](https://docs.docker.com/get-docker/) to get started.
+
 ```bash
 docker run -d \
   -p 9000:9000 \
@@ -15,12 +17,16 @@ docker run -d \
 
 ## Usage
 
+Interact with the gateway using the [AWS CLI](https://aws.amazon.com/cli/).
+
 ```bash
 aws --endpoint-url http://localhost:9000 s3 ls
 aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://my-bucket/file.txt
 ```
 
 ## Development
+
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
 
 ```bash
 uv sync
