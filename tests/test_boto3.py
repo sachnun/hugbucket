@@ -27,6 +27,7 @@ from aiohttp.test_utils import TestServer
 
 from hugbucket.config import Config
 from hugbucket.bridge import Bridge
+from hugbucket.s3.auth import s3_auth_middleware
 from hugbucket.s3.server import S3Handler
 
 
@@ -54,7 +55,11 @@ def s3_server(hf_token: str):
         config.hf_namespace = await bridge.hub.whoami()
 
         handler = S3Handler(bridge)
-        app = web.Application(client_max_size=256 * 1024 * 1024)
+        app = web.Application(
+            client_max_size=256 * 1024 * 1024,
+            middlewares=[s3_auth_middleware],
+        )
+        app["config"] = config
         handler.setup_routes(app)
 
         server = TestServer(app)
