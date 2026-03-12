@@ -23,6 +23,12 @@ dev = [
     "pytest-aiohttp>=1.0",
 ]
 
+[tool.setuptools.package-dir]
+hugbucket = "src"
+
+[tool.setuptools]
+packages = ["hugbucket", "hugbucket.hub", "hugbucket.s3", "hugbucket.xet"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
