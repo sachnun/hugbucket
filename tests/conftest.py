@@ -27,7 +27,7 @@ def small_bytes() -> bytes:
     return os.urandom(1024)
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def hf_token() -> str:
     """HF token from env (required for integration tests)."""
     token = os.environ.get("HF_TOKEN", "")
