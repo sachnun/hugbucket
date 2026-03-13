@@ -3,6 +3,11 @@
 Supports both:
 1. Authorization header-based authentication (standard S3 API calls)
 2. Query-string authentication (presigned URLs)
+
+Error codes returned match real AWS S3 behaviour:
+- ``AccessDenied``            — no credentials / expired presigned URL
+- ``InvalidAccessKeyId``      — unknown access key
+- ``SignatureDoesNotMatch``   — signature mismatch
 """
 
 from __future__ import annotations
@@ -10,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, unquote
 
@@ -23,7 +30,24 @@ logger = logging.getLogger(__name__)
 _ALGORITHM = "AWS4-HMAC-SHA256"
 
 
+# ── auth error descriptor ───────────────────────────────────────────────
+
+
+@dataclass
+class AuthError:
+    """Describes an authentication failure in S3-compatible terms."""
+
+    http_status: int
+    code: str
+    message: str
+    extra: dict[str, str] = field(default_factory=dict)
+
+
 # ── helpers ──────────────────────────────────────────────────────────────
+
+
+def _request_id() -> str:
+    return uuid.uuid4().hex[:16].upper()
 
 
 def _hmac_sha256(key: bytes, msg: str) -> bytes:
@@ -132,15 +156,26 @@ def _parse_auth_header(header: str) -> dict | None:
     }
 
 
-def _verify_header_auth(request: web.Request, config: Config) -> bool:
-    """Verify a standard Authorization-header SigV4 request."""
+def _verify_header_auth(request: web.Request, config: Config) -> AuthError | None:
+    """Verify a standard Authorization-header SigV4 request.
+
+    Returns ``None`` on success or an :class:`AuthError` on failure.
+    """
     parsed = _parse_auth_header(request.headers.get("Authorization", ""))
     if parsed is None:
-        return False
+        return AuthError(
+            403,
+            "AccessDenied",
+            "Access Denied",
+        )
 
     if parsed["access_key"] != config.s3_access_key:
-        logger.warning("S3 auth: access key mismatch (got %s)", parsed["access_key"])
-        return False
+        return AuthError(
+            403,
+            "InvalidAccessKeyId",
+            "The AWS Access Key Id you provided does not exist in our records.",
+            {"AWSAccessKeyId": parsed["access_key"]},
+        )
 
     # ── canonical request ────────────────────────────────────────────
     method = request.method
@@ -192,20 +227,33 @@ def _verify_header_auth(request: web.Request, config: Config) -> bool:
             canonical_request,
             string_to_sign,
         )
-        return False
+        return AuthError(
+            403,
+            "SignatureDoesNotMatch",
+            "The request signature we calculated does not match the signature "
+            "you provided. Check your key and signing method.",
+            {
+                "AWSAccessKeyId": parsed["access_key"],
+                "StringToSign": string_to_sign,
+                "SignatureProvided": parsed["signature"],
+            },
+        )
 
-    return True
+    return None  # success
 
 
 # ── Query-string (presigned URL) auth ────────────────────────────────────
 
 
-def _verify_query_auth(request: web.Request, config: Config) -> bool:
-    """Verify a presigned-URL (query-string) SigV4 request."""
+def _verify_query_auth(request: web.Request, config: Config) -> AuthError | None:
+    """Verify a presigned-URL (query-string) SigV4 request.
+
+    Returns ``None`` on success or an :class:`AuthError` on failure.
+    """
     query = request.query
 
     if query.get("X-Amz-Algorithm", "") != _ALGORITHM:
-        return False
+        return AuthError(403, "AccessDenied", "Access Denied")
 
     credential = query.get("X-Amz-Credential", "")
     amz_date = query.get("X-Amz-Date", "")
@@ -214,16 +262,20 @@ def _verify_query_auth(request: web.Request, config: Config) -> bool:
     signature = query.get("X-Amz-Signature", "")
 
     if not all([credential, amz_date, expires, signed_headers_str, signature]):
-        return False
+        return AuthError(403, "AccessDenied", "Access Denied")
 
     cred_parts = credential.split("/")
     if len(cred_parts) != 5:
-        return False
+        return AuthError(403, "AccessDenied", "Access Denied")
 
     access_key, date_stamp, region, service, _ = cred_parts
     if access_key != config.s3_access_key:
-        logger.warning("S3 presigned auth: access key mismatch (got %s)", access_key)
-        return False
+        return AuthError(
+            403,
+            "InvalidAccessKeyId",
+            "The AWS Access Key Id you provided does not exist in our records.",
+            {"AWSAccessKeyId": access_key},
+        )
 
     # ── expiration check ─────────────────────────────────────────────
     try:
@@ -231,11 +283,21 @@ def _verify_query_auth(request: web.Request, config: Config) -> bool:
             tzinfo=timezone.utc
         )
         expire_seconds = int(expires)
-        if datetime.now(timezone.utc) > req_time + timedelta(seconds=expire_seconds):
-            logger.warning("S3 presigned auth: URL has expired")
-            return False
+        now = datetime.now(timezone.utc)
+        expiry_time = req_time + timedelta(seconds=expire_seconds)
+        if now > expiry_time:
+            return AuthError(
+                403,
+                "AccessDenied",
+                "Request has expired",
+                {
+                    "X-Amz-Expires": expires,
+                    "Expires": expiry_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "ServerTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+            )
     except ValueError, OverflowError:
-        return False
+        return AuthError(403, "AccessDenied", "Access Denied")
 
     # ── canonical request ────────────────────────────────────────────
     method = request.method
@@ -285,19 +347,29 @@ def _verify_query_auth(request: web.Request, config: Config) -> bool:
             canonical_request,
             string_to_sign,
         )
-        return False
+        return AuthError(
+            403,
+            "SignatureDoesNotMatch",
+            "The request signature we calculated does not match the signature "
+            "you provided. Check your key and signing method.",
+            {
+                "AWSAccessKeyId": access_key,
+                "StringToSign": string_to_sign,
+                "SignatureProvided": signature,
+            },
+        )
 
-    return True
+    return None  # success
 
 
 # ── public API ───────────────────────────────────────────────────────────
 
 
-def verify_request(request: web.Request, config: Config) -> bool:
-    """Return *True* if the request carries a valid AWS SigV4 credential.
+def verify_request(request: web.Request, config: Config) -> AuthError | None:
+    """Check AWS SigV4 credentials on *request*.
 
-    Checks the ``Authorization`` header first; falls back to query-string
-    parameters (presigned URL).
+    Returns ``None`` when the request is authenticated, or an
+    :class:`AuthError` describing the failure.
     """
     if request.headers.get("Authorization", ""):
         return _verify_header_auth(request, config)
@@ -305,7 +377,8 @@ def verify_request(request: web.Request, config: Config) -> bool:
     if "X-Amz-Algorithm" in request.query:
         return _verify_query_auth(request, config)
 
-    return False
+    # No credentials provided at all
+    return AuthError(403, "AccessDenied", "Access Denied")
 
 
 @web.middleware
@@ -313,13 +386,19 @@ async def s3_auth_middleware(request: web.Request, handler: object) -> web.Respo
     """aiohttp middleware that enforces AWS Signature V4 on every request."""
     config: Config = request.app["config"]
 
-    if not verify_request(request, config):
+    err = verify_request(request, config)
+    if err is not None:
         body = error_xml(
-            "AccessDenied",
-            "Access Denied. Provide valid AWS credentials.",
-            request.path,
-            "0",
+            err.code,
+            err.message,
+            resource=request.path,
+            request_id=_request_id(),
+            extra=err.extra or None,
         )
-        return web.Response(status=403, content_type="application/xml", body=body)
+        return web.Response(
+            status=err.http_status,
+            content_type="application/xml",
+            body=body,
+        )
 
     return await handler(request)

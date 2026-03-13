@@ -1,10 +1,10 @@
 """Tests for AWS Signature V4 authentication middleware.
 
 Verifies that:
-- Requests without credentials are rejected (403).
-- Requests with wrong credentials are rejected (403).
+- Requests without credentials are rejected (403) with correct S3 error XML.
+- Requests with wrong credentials return the right S3 error code.
 - Properly signed requests (header-based) are accepted.
-- Presigned-URL requests (query-string auth) are accepted.
+- Error XML format matches real AWS S3 (no xmlns, has HostId, etc.).
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import hmac
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import quote
+from xml.etree.ElementTree import fromstring
 
 import pytest
 from aiohttp import web
@@ -126,6 +127,32 @@ def _sign_request(
     return headers
 
 
+# ── XML assertion helpers ────────────────────────────────────────────────
+
+
+def _parse_error_xml(body: str) -> dict[str, str]:
+    """Parse an S3 error XML body into a flat dict of element tag → text."""
+    root = fromstring(body)
+    return {child.tag: (child.text or "") for child in root}
+
+
+def _assert_s3_error_structure(body: str) -> dict[str, str]:
+    """Assert the XML matches the real AWS S3 error format and return fields."""
+    # Must NOT have xmlns (only success responses have it)
+    assert 'xmlns="' not in body, "Error XML must not contain xmlns"
+    assert body.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+
+    fields = _parse_error_xml(body)
+
+    # AWS always includes these
+    assert "Code" in fields
+    assert "Message" in fields
+    assert "RequestId" in fields
+    assert "HostId" in fields
+
+    return fields
+
+
 # ── fixtures ─────────────────────────────────────────────────────────────
 
 
@@ -186,41 +213,71 @@ async def client(aiohttp_client, app: web.Application) -> TestClient:
     return await aiohttp_client(app)
 
 
-# ── tests: unauthenticated requests are rejected ────────────────────────
+# ── tests: error XML format matches real AWS S3 ─────────────────────────
+
+
+class TestErrorXMLFormat:
+    """Verify error responses match the real AWS S3 XML structure."""
+
+    async def test_no_xmlns_on_error(self, client: TestClient) -> None:
+        """AWS S3 error XML does NOT carry xmlns (unlike success responses)."""
+        resp = await client.get("/")
+        body = await resp.text()
+        assert 'xmlns="' not in body
+
+    async def test_has_required_elements(self, client: TestClient) -> None:
+        """Error must contain Code, Message, RequestId, HostId."""
+        resp = await client.get("/")
+        body = await resp.text()
+        fields = _assert_s3_error_structure(body)
+        assert fields["Code"] == "AccessDenied"
+        assert fields["Message"] == "Access Denied"
+
+    async def test_has_resource_element(self, client: TestClient) -> None:
+        """Error should include the Resource that was accessed."""
+        resp = await client.get("/bucket/key.txt")
+        body = await resp.text()
+        fields = _assert_s3_error_structure(body)
+        assert fields.get("Resource") == "/bucket/key.txt"
+
+
+# ── tests: unauthenticated requests → AccessDenied ──────────────────────
 
 
 class TestUnauthenticatedRejection:
-    """Requests without valid AWS credentials must return 403."""
+    """Requests without any AWS credentials must return 403 AccessDenied."""
 
-    async def test_no_auth_header_get_root(self, client: TestClient) -> None:
+    async def test_no_auth_get_root(self, client: TestClient) -> None:
         resp = await client.get("/")
         assert resp.status == 403
-        body = await resp.text()
-        assert "AccessDenied" in body
+        fields = _assert_s3_error_structure(await resp.text())
+        assert fields["Code"] == "AccessDenied"
 
-    async def test_no_auth_header_get_object(self, client: TestClient) -> None:
+    async def test_no_auth_get_object(self, client: TestClient) -> None:
         resp = await client.get("/bucket/key.txt")
         assert resp.status == 403
 
-    async def test_no_auth_header_put_object(self, client: TestClient) -> None:
+    async def test_no_auth_put_object(self, client: TestClient) -> None:
         resp = await client.put("/bucket/key.txt", data=b"hello")
         assert resp.status == 403
 
-    async def test_no_auth_header_delete_object(self, client: TestClient) -> None:
+    async def test_no_auth_delete_object(self, client: TestClient) -> None:
         resp = await client.delete("/bucket/key.txt")
         assert resp.status == 403
 
-    async def test_no_auth_header_head_object(self, client: TestClient) -> None:
+    async def test_no_auth_head_object(self, client: TestClient) -> None:
         resp = await client.head("/bucket/key.txt")
         assert resp.status == 403
 
-    async def test_no_auth_header_list_objects(self, client: TestClient) -> None:
+    async def test_no_auth_list_objects(self, client: TestClient) -> None:
         resp = await client.get("/bucket?list-type=2")
         assert resp.status == 403
 
     async def test_garbage_auth_header(self, client: TestClient) -> None:
         resp = await client.get("/", headers={"Authorization": "garbage"})
         assert resp.status == 403
+        fields = _assert_s3_error_structure(await resp.text())
+        assert fields["Code"] == "AccessDenied"
 
     async def test_wrong_algorithm(self, client: TestClient) -> None:
         resp = await client.get(
@@ -232,22 +289,36 @@ class TestUnauthenticatedRejection:
         assert resp.status == 403
 
 
-# ── tests: wrong credentials are rejected ────────────────────────────────
+# ── tests: wrong credentials → specific error codes ─────────────────────
 
 
 class TestWrongCredentials:
-    async def test_wrong_access_key(self, client: TestClient) -> None:
+    async def test_wrong_access_key_returns_InvalidAccessKeyId(
+        self, client: TestClient
+    ) -> None:
+        """AWS returns InvalidAccessKeyId when the key is unknown."""
         headers = _sign_request("GET", "/", access_key="wrong-key")
-        # Remove Host header (aiohttp test client sets its own)
-        host = headers.pop("Host", None)
+        headers.pop("Host", None)
         resp = await client.get("/", headers=headers)
         assert resp.status == 403
+        fields = _assert_s3_error_structure(await resp.text())
+        assert fields["Code"] == "InvalidAccessKeyId"
+        assert "AWSAccessKeyId" in fields
+        assert fields["AWSAccessKeyId"] == "wrong-key"
 
-    async def test_wrong_secret_key(self, client: TestClient) -> None:
+    async def test_wrong_secret_key_returns_SignatureDoesNotMatch(
+        self, client: TestClient
+    ) -> None:
+        """AWS returns SignatureDoesNotMatch when the signature is wrong."""
         headers = _sign_request("GET", "/", secret_key="wrong-secret")
         headers.pop("Host", None)
         resp = await client.get("/", headers=headers)
         assert resp.status == 403
+        fields = _assert_s3_error_structure(await resp.text())
+        assert fields["Code"] == "SignatureDoesNotMatch"
+        assert "AWSAccessKeyId" in fields
+        assert "StringToSign" in fields
+        assert "SignatureProvided" in fields
 
 
 # ── tests: properly signed requests are accepted ────────────────────────

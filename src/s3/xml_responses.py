@@ -107,15 +107,32 @@ def list_objects_v2_xml(
 
 
 def error_xml(
-    code: str, message: str, resource: str = "", request_id: str = ""
+    code: str,
+    message: str,
+    resource: str = "",
+    request_id: str = "",
+    host_id: str = "",
+    extra: dict[str, str] | None = None,
 ) -> bytes:
-    """Build S3 Error XML."""
-    root = _make_root("Error")
+    """Build S3 Error XML.
+
+    AWS S3 error responses do **not** carry an ``xmlns`` attribute
+    (unlike success responses such as ``ListBucketResult``).
+
+    *extra* — optional dict of additional child elements specific to
+    the error type (e.g. ``AWSAccessKeyId``, ``StringToSign``).
+    """
+    # No xmlns on <Error> — matches real AWS behaviour
+    root = Element("Error")
     _add_text(root, "Code", code)
     _add_text(root, "Message", message)
     if resource:
         _add_text(root, "Resource", resource)
+    if extra:
+        for k, v in extra.items():
+            _add_text(root, k, v)
     _add_text(root, "RequestId", request_id or "hugbucket")
+    _add_text(root, "HostId", host_id or "hugbucket")
     return to_xml_bytes(root)
 
 
