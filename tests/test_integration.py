@@ -169,19 +169,26 @@ class TestDirectoryMarker:
     """Test folder creation (directory marker) against live HF API."""
 
     async def test_create_folder_marker(self, bridge: Bridge) -> None:
-        """PUT with trailing-slash empty body should succeed without hitting batch API."""
+        """PUT with trailing-slash empty body should store a placeholder file."""
         bucket_name = f"pytest-dm-{int(time.time()) % 100000}"
         try:
             await bridge.create_bucket(bucket_name)
 
-            # Create a folder marker — this should NOT hit the batch API (virtual no-op)
+            # Create a folder marker — stores .hugbucket_keep placeholder
             result = await bridge.put_object(bucket_name, "New Folder/", b"")
             assert "ETag" in result
             assert result["size"] == 0
 
-            # The folder marker should not be listed as a file
-            info = await bridge.head_object(bucket_name, "New Folder/")
-            assert info is None  # virtual directory, no file record
+            # The placeholder should exist but be hidden from listings
+            info = await bridge.head_object(bucket_name, "New Folder/.hugbucket_keep")
+            assert info is not None
+
+            # The folder itself should appear as a common prefix in listings
+            listing = await bridge.list_objects(bucket_name, delimiter="/")
+            assert "New Folder/" in listing["common_prefixes"]
+            # The placeholder must NOT appear in contents
+            content_keys = {f.path for f in listing["contents"]}
+            assert "New Folder/.hugbucket_keep" not in content_keys
 
         finally:
             await bridge.delete_bucket(bucket_name)
@@ -192,20 +199,22 @@ class TestDirectoryMarker:
         try:
             await bridge.create_bucket(bucket_name)
 
-            # Create folder marker (no-op), then real files inside
+            # Create folder marker (stores placeholder), then real files inside
             await bridge.put_object(bucket_name, "data/", b"")
             await bridge.put_object(bucket_name, "data/file1.txt", b"hello")
             await bridge.put_object(bucket_name, "data/file2.txt", b"world")
 
-            # List with prefix — should see the files
+            # List with prefix — should see the files but not the placeholder
             result = await bridge.list_objects(bucket_name, prefix="data/")
             keys = {f.path for f in result["contents"]}
             assert "data/file1.txt" in keys
             assert "data/file2.txt" in keys
+            assert "data/.hugbucket_keep" not in keys
 
-            # Clean up
+            # Clean up (delete_object on dir/ also deletes the placeholder)
             await bridge.delete_object(bucket_name, "data/file1.txt")
             await bridge.delete_object(bucket_name, "data/file2.txt")
+            await bridge.delete_object(bucket_name, "data/")
         finally:
             await bridge.delete_bucket(bucket_name)
 

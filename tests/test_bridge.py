@@ -44,7 +44,8 @@ def bridge(config: Config, mock_hub: MagicMock, mock_cas: MagicMock):
 
 
 class TestDirectoryMarkers:
-    """Test that folder-creation PUTs (trailing-slash, empty body) are no-ops."""
+    """Test that folder-creation PUTs (trailing-slash, empty body) store a
+    hidden placeholder file so empty folders appear in listings."""
 
     async def test_folder_marker_returns_success(self, bridge) -> None:
         result = await bridge.put_object("mybucket", "New Folder/", b"")
@@ -53,12 +54,16 @@ class TestDirectoryMarkers:
         assert result["ETag"] == expected_etag
         assert result["size"] == 0
 
-    async def test_folder_marker_skips_batch_api(
+    async def test_folder_marker_stores_placeholder(
         self, bridge, mock_hub: MagicMock
     ) -> None:
-        """Directory markers must NOT call the Hub batch API."""
+        """Directory markers must store a .hugbucket_keep placeholder via batch API."""
         await bridge.put_object("mybucket", "some/dir/", b"")
-        mock_hub.batch_files.assert_not_awaited()
+        mock_hub.batch_files.assert_awaited_once()
+        call_args = mock_hub.batch_files.call_args
+        add_list = call_args.kwargs.get("add") or call_args[1].get("add")
+        assert len(add_list) == 1
+        assert add_list[0]["path"] == "some/dir/.hugbucket_keep"
 
     async def test_folder_marker_skips_xet_upload(
         self, bridge, mock_hub: MagicMock, mock_cas: MagicMock
@@ -70,7 +75,10 @@ class TestDirectoryMarkers:
     async def test_nested_folder_marker(self, bridge, mock_hub: MagicMock) -> None:
         result = await bridge.put_object("mybucket", "a/b/c/d/", b"")
         assert result["size"] == 0
-        mock_hub.batch_files.assert_not_awaited()
+        mock_hub.batch_files.assert_awaited_once()
+        call_args = mock_hub.batch_files.call_args
+        add_list = call_args.kwargs.get("add") or call_args[1].get("add")
+        assert add_list[0]["path"] == "a/b/c/d/.hugbucket_keep"
 
     async def test_non_folder_empty_file_still_calls_batch(
         self, bridge, mock_hub: MagicMock
