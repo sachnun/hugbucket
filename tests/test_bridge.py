@@ -47,17 +47,30 @@ class TestDirectoryMarkers:
     """Test that folder-creation PUTs (trailing-slash, empty body) store a
     hidden placeholder file so empty folders appear in listings."""
 
-    async def test_folder_marker_returns_success(self, bridge) -> None:
+    @staticmethod
+    def _setup_xet_mocks(mock_hub: MagicMock, mock_cas: MagicMock) -> None:
+        """Wire up the Xet write-token / CAS mocks for full upload path."""
+        mock_hub.get_xet_write_token.return_value = MagicMock(
+            endpoint="https://example.com",
+            access_token="tok",
+            expiration_unix_epoch=9999999999,
+        )
+        mock_cas.upload_xorb = AsyncMock()
+        mock_cas.upload_shard = AsyncMock()
+
+    async def test_folder_marker_returns_success(
+        self, bridge, mock_hub: MagicMock, mock_cas: MagicMock
+    ) -> None:
+        self._setup_xet_mocks(mock_hub, mock_cas)
         result = await bridge.put_object("mybucket", "New Folder/", b"")
         assert "ETag" in result
-        expected_etag = f'"{hashlib.md5(b"").hexdigest()}"'
-        assert result["ETag"] == expected_etag
-        assert result["size"] == 0
+        assert result["size"] > 0  # tiny placeholder content
 
     async def test_folder_marker_stores_placeholder(
-        self, bridge, mock_hub: MagicMock
+        self, bridge, mock_hub: MagicMock, mock_cas: MagicMock
     ) -> None:
         """Directory markers must store a .hugbucket_keep placeholder via batch API."""
+        self._setup_xet_mocks(mock_hub, mock_cas)
         await bridge.put_object("mybucket", "some/dir/", b"")
         mock_hub.batch_files.assert_awaited_once()
         call_args = mock_hub.batch_files.call_args
@@ -65,16 +78,22 @@ class TestDirectoryMarkers:
         assert len(add_list) == 1
         assert add_list[0]["path"] == "some/dir/.hugbucket_keep"
 
-    async def test_folder_marker_skips_xet_upload(
+    async def test_folder_marker_uploads_to_xet(
         self, bridge, mock_hub: MagicMock, mock_cas: MagicMock
     ) -> None:
-        """Directory markers must NOT upload anything to Xet CAS."""
+        """Directory markers must go through the full Xet CAS upload path."""
+        self._setup_xet_mocks(mock_hub, mock_cas)
         await bridge.put_object("mybucket", "folder/", b"")
-        mock_hub.get_xet_write_token.assert_not_awaited()
+        mock_hub.get_xet_write_token.assert_awaited_once()
+        mock_cas.upload_xorb.assert_awaited_once()
+        mock_cas.upload_shard.assert_awaited_once()
 
-    async def test_nested_folder_marker(self, bridge, mock_hub: MagicMock) -> None:
+    async def test_nested_folder_marker(
+        self, bridge, mock_hub: MagicMock, mock_cas: MagicMock
+    ) -> None:
+        self._setup_xet_mocks(mock_hub, mock_cas)
         result = await bridge.put_object("mybucket", "a/b/c/d/", b"")
-        assert result["size"] == 0
+        assert result["size"] > 0
         mock_hub.batch_files.assert_awaited_once()
         call_args = mock_hub.batch_files.call_args
         add_list = call_args.kwargs.get("add") or call_args[1].get("add")

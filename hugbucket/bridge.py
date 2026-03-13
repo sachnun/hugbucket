@@ -48,6 +48,7 @@ MAX_CHUNKS_PER_XORB = 1024
 # a trailing slash; HF Storage Buckets use virtual directories (inferred from
 # file paths), so we materialise the folder by storing this tiny sentinel.
 DIR_MARKER_FILENAME = ".hugbucket_keep"
+DIR_MARKER_CONTENT = b"\n"  # must be non-empty so the full Xet upload runs
 
 
 @dataclass
@@ -262,11 +263,14 @@ class Bridge:
         # directories — they are inferred from file paths, not created
         # explicitly — so the batch API rejects addFile for such paths (422).
         # Store a hidden placeholder file inside the directory so it shows up
-        # in listings.
+        # in listings.  The content must be non-empty because the batch API
+        # rejects files whose xetHash has not been uploaded to Xet CAS, and
+        # _put_empty_file skips the CAS upload step.
         if key.endswith("/") and len(data) == 0:
-            marker_key = key + DIR_MARKER_FILENAME
-            logger.info(f"PUT {key}: directory marker -> {marker_key}")
-            return await self._put_empty_file(bucket_id, marker_key)
+            logger.info(f"PUT {key}: directory marker -> {key}{DIR_MARKER_FILENAME}")
+            key = key + DIR_MARKER_FILENAME
+            data = DIR_MARKER_CONTENT
+            # Fall through to the normal upload path below
 
         # Handle empty files
         if len(data) == 0:
