@@ -7,6 +7,7 @@ Supports: ListBuckets, CreateBucket, DeleteBucket, HeadBucket,
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import mimetypes
@@ -464,9 +465,11 @@ class S3Handler:
                     "You must specify at least one part.",
                 )
 
-            # Concatenate parts in order
+            # Concatenate parts in order (offload to thread for large payloads)
             sorted_part_nums = sorted(parts.keys())
-            data = b"".join(parts[n] for n in sorted_part_nums)
+            data = await asyncio.to_thread(
+                lambda: b"".join(parts[n] for n in sorted_part_nums)
+            )
 
             logger.info(
                 f"CompleteMultipartUpload: uploadId={upload_id} "
