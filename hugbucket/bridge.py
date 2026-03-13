@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 # Max chunks per xorb (approx, to stay within 64 MiB serialized)
 MAX_CHUNKS_PER_XORB = 1024
 
+# Hidden placeholder file stored inside "empty" directories so they appear
+# in listings.  S3 clients create folders by PUTting a zero-byte object with
+# a trailing slash; HF Storage Buckets use virtual directories (inferred from
+# file paths), so we materialise the folder by storing this tiny sentinel.
+DIR_MARKER_FILENAME = ".hugbucket_keep"
+
 
 @dataclass
 class _XorbBatch:
@@ -255,11 +261,12 @@ class Bridge:
         # trailing slash (e.g. "my-folder/").  HF Storage Buckets use virtual
         # directories — they are inferred from file paths, not created
         # explicitly — so the batch API rejects addFile for such paths (422).
-        # Return a synthetic success response instead.
+        # Store a hidden placeholder file inside the directory so it shows up
+        # in listings.
         if key.endswith("/") and len(data) == 0:
-            logger.info(f"PUT {key}: directory marker (virtual, no-op)")
-            etag = hashlib.md5(b"").hexdigest()
-            return {"ETag": f'"{etag}"', "size": 0}
+            marker_key = key + DIR_MARKER_FILENAME
+            logger.info(f"PUT {key}: directory marker -> {marker_key}")
+            return await self._put_empty_file(bucket_id, marker_key)
 
         # Handle empty files
         if len(data) == 0:
@@ -400,7 +407,11 @@ class Bridge:
     async def delete_object(self, bucket: str, key: str) -> None:
         """Delete an object."""
         bucket_id = self._bucket_id(bucket)
-        await self.hub.batch_files(bucket_id, delete=[key])
+        keys_to_delete = [key]
+        # Directory marker PUTs store a hidden placeholder; delete it too.
+        if key.endswith("/"):
+            keys_to_delete.append(key + DIR_MARKER_FILENAME)
+        await self.hub.batch_files(bucket_id, delete=keys_to_delete)
 
     async def delete_objects(
         self, bucket: str, keys: list[str]
@@ -411,11 +422,16 @@ class Bridge:
         {"key": ..., "code": ..., "message": ...} dicts.
         """
         bucket_id = self._bucket_id(bucket)
+        # Expand directory keys to also delete the marker placeholder
+        all_keys = list(keys)
+        for key in keys:
+            if key.endswith("/"):
+                all_keys.append(key + DIR_MARKER_FILENAME)
         deleted: list[str] = []
         errors: list[dict] = []
         try:
-            await self.hub.batch_files(bucket_id, delete=keys)
-            deleted = list(keys)
+            await self.hub.batch_files(bucket_id, delete=all_keys)
+            deleted = list(keys)  # report original keys only
         except Exception as exc:
             logger.exception("delete_objects batch failed")
             # Report every key as failed so the caller can build a proper
@@ -520,6 +536,13 @@ class Bridge:
                         contents.append(f)
         else:
             contents = [f for f in filtered if f.type == "file"]
+
+        # Hide directory-marker placeholder files from contents
+        # (they must stay in the filtered list above so that empty folders
+        # still contribute to common_prefixes)
+        contents = [
+            f for f in contents if not f.path.endswith("/" + DIR_MARKER_FILENAME)
+        ]
 
         # Sort by key
         contents.sort(key=lambda f: f.path)
