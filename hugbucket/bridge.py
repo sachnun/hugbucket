@@ -6,6 +6,7 @@ This is the core translation layer that maps high-level operations
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import mimetypes
@@ -41,6 +42,153 @@ logger = logging.getLogger(__name__)
 
 # Max chunks per xorb (approx, to stay within 64 MiB serialized)
 MAX_CHUNKS_PER_XORB = 1024
+
+
+@dataclass
+class _XorbBatch:
+    """Pre-computed xorb ready for upload."""
+
+    xorb_bytes: bytes
+    xorb_hash_hex: str
+    xorb_info: XorbInfo
+    file_term: FileDataTerm
+    verification_hash: bytes
+
+
+@dataclass
+class _PreparedUpload:
+    """All CPU-bound results needed to complete an upload."""
+
+    file_hash_hex: str
+    xorb_batches: list[_XorbBatch]
+    file_info: FileInfo
+    etag: str
+
+
+def _prepare_upload(data: bytes) -> _PreparedUpload:
+    """CPU-bound upload preparation (chunking, hashing, compression).
+
+    This runs in a thread to avoid blocking the async event loop.
+    """
+    # Step 1: CDC chunk
+    chunks = chunk_data(data)
+    logger.info(f"prepare_upload: {len(data)} bytes -> {len(chunks)} chunks")
+
+    # Step 2: Hash all chunks
+    c_hashes: list[bytes] = []
+    c_sizes: list[int] = []
+    for c in chunks:
+        c_hashes.append(chunk_hash(c.data))
+        c_sizes.append(len(c.data))
+
+    # Step 3: Compute file hash
+    f_hash = file_hash(c_hashes, c_sizes)
+    f_hash_hex = hash_to_hex(f_hash)
+
+    # Step 4: Group chunks into xorbs, serialize each
+    xorb_batches: list[_XorbBatch] = []
+    file_terms: list[FileDataTerm] = []
+    term_verification_hashes: list[bytes] = []
+
+    xorb_chunks: list[bytes] = []
+    xorb_c_hashes: list[bytes] = []
+    xorb_c_sizes: list[int] = []
+    chunk_start_in_xorb = 0
+
+    def _flush_xorb() -> None:
+        nonlocal xorb_chunks, xorb_c_hashes, xorb_c_sizes
+        nonlocal chunk_start_in_xorb
+
+        if not xorb_chunks:
+            return
+
+        # Serialize (LZ4 compression)
+        xorb_bytes, xorb_offsets = serialize_xorb(xorb_chunks)
+        x_hash = xorb_hash(xorb_c_hashes, xorb_c_sizes)
+        x_hash_hex = hash_to_hex(x_hash)
+
+        # Build CAS info using cumulative uncompressed byte offsets
+        cas_chunks: list[CASChunkInfo] = []
+        uncompressed_offset = 0
+        for i, (ch, cs) in enumerate(zip(xorb_c_hashes, xorb_c_sizes)):
+            cas_chunks.append(
+                CASChunkInfo(
+                    chunk_hash=ch,
+                    byte_range_start=uncompressed_offset,
+                    unpacked_bytes=cs,
+                )
+            )
+            uncompressed_offset += cs
+
+        xi = XorbInfo(
+            xorb_hash=x_hash,
+            cas_flags=0,
+            chunks=cas_chunks,
+            total_bytes_in_xorb=sum(xorb_c_sizes),
+            total_bytes_on_disk=len(xorb_bytes),
+        )
+
+        ft = FileDataTerm(
+            xorb_hash=x_hash,
+            cas_flags=0,
+            unpacked_bytes=sum(xorb_c_sizes),
+            chunk_start=chunk_start_in_xorb,
+            chunk_end=chunk_start_in_xorb + len(xorb_chunks),
+        )
+
+        v_hash = verification_hash(xorb_c_hashes)
+
+        xorb_batches.append(
+            _XorbBatch(
+                xorb_bytes=xorb_bytes,
+                xorb_hash_hex=x_hash_hex,
+                xorb_info=xi,
+                file_term=ft,
+                verification_hash=v_hash,
+            )
+        )
+
+        file_terms.append(ft)
+        term_verification_hashes.append(v_hash)
+
+        # Reset
+        xorb_chunks = []
+        xorb_c_hashes = []
+        xorb_c_sizes = []
+        chunk_start_in_xorb = 0
+
+    for i, c in enumerate(chunks):
+        xorb_chunks.append(c.data)
+        xorb_c_hashes.append(c_hashes[i])
+        xorb_c_sizes.append(c_sizes[i])
+
+        if (
+            len(xorb_chunks) >= MAX_CHUNKS_PER_XORB
+            or sum(len(d) for d in xorb_chunks) >= XORB_MAX_BYTES // 2
+        ):
+            _flush_xorb()
+            chunk_start_in_xorb = 0
+
+    _flush_xorb()
+
+    # Step 5: Build shard
+    fi = FileInfo(
+        file_hash=f_hash,
+        terms=file_terms,
+        verification_hashes=term_verification_hashes,
+    )
+    # NOTE: shard_bytes is built later after uploads, but since build_shard
+    # is also CPU-bound, we do it here too.
+
+    # Step 6: MD5 for ETag
+    etag = hashlib.md5(data).hexdigest()
+
+    return _PreparedUpload(
+        file_hash_hex=f_hash_hex,
+        xorb_batches=xorb_batches,
+        file_info=fi,
+        etag=etag,
+    )
 
 
 @dataclass
@@ -97,6 +245,9 @@ class Bridge:
         4. Upload xorbs to CAS
         5. Build + upload shard
         6. Register file via Hub batch API
+
+        CPU-bound work (chunking, hashing, compression, MD5) is offloaded
+        to a thread so the event loop stays responsive during uploads.
         """
         bucket_id = self._bucket_id(bucket)
 
@@ -104,120 +255,28 @@ class Bridge:
         if len(data) == 0:
             return await self._put_empty_file(bucket_id, key)
 
-        # Step 1: CDC chunk
-        chunks = chunk_data(data)
-        logger.info(f"PUT {key}: {len(data)} bytes -> {len(chunks)} chunks")
+        # Run all CPU-bound work in a thread (chunking, hashing,
+        # LZ4 compression, shard building, MD5)
+        prepared = await asyncio.to_thread(_prepare_upload, data)
+        logger.info(
+            f"PUT {key}: {len(data)} bytes -> {len(prepared.xorb_batches)} xorb(s)"
+        )
 
-        # Step 2: Hash all chunks
-        c_hashes: list[bytes] = []
-        c_sizes: list[int] = []
-        for c in chunks:
-            c_hashes.append(chunk_hash(c.data))
-            c_sizes.append(len(c.data))
-
-        # Step 3: Compute file hash
-        f_hash = file_hash(c_hashes, c_sizes)
-        f_hash_hex = hash_to_hex(f_hash)
-
-        # Step 4: Get write token
+        # Get write token (network I/O, stays on event loop)
         conn = await self.hub.get_xet_write_token(bucket_id)
 
-        # Step 5: Group chunks into xorbs and upload
-        xorb_infos: list[XorbInfo] = []
-        file_terms: list[FileDataTerm] = []
-        term_verification_hashes: list[bytes] = []
+        # Upload xorbs to CAS (network I/O)
+        for batch in prepared.xorb_batches:
+            await self.cas.upload_xorb(conn, batch.xorb_hash_hex, batch.xorb_bytes)
 
-        xorb_chunks: list[bytes] = []  # raw chunk data
-        xorb_c_hashes: list[bytes] = []  # chunk hashes for current xorb
-        xorb_c_sizes: list[int] = []  # chunk sizes for current xorb
-        chunk_start_in_xorb = 0
-
-        async def _flush_xorb() -> None:
-            nonlocal xorb_chunks, xorb_c_hashes, xorb_c_sizes
-            nonlocal chunk_start_in_xorb
-
-            if not xorb_chunks:
-                return
-
-            # Serialize
-            xorb_bytes, xorb_offsets = serialize_xorb(xorb_chunks)
-            x_hash = xorb_hash(xorb_c_hashes, xorb_c_sizes)
-            x_hash_hex = hash_to_hex(x_hash)
-
-            # Upload to CAS
-            await self.cas.upload_xorb(conn, x_hash_hex, xorb_bytes)
-
-            # Build CAS info using cumulative uncompressed byte offsets
-            cas_chunks: list[CASChunkInfo] = []
-            uncompressed_offset = 0
-            for i, (ch, cs) in enumerate(zip(xorb_c_hashes, xorb_c_sizes)):
-                cas_chunks.append(
-                    CASChunkInfo(
-                        chunk_hash=ch,
-                        byte_range_start=uncompressed_offset,
-                        unpacked_bytes=cs,
-                    )
-                )
-                uncompressed_offset += cs
-
-            xorb_infos.append(
-                XorbInfo(
-                    xorb_hash=x_hash,
-                    cas_flags=0,
-                    chunks=cas_chunks,
-                    total_bytes_in_xorb=sum(xorb_c_sizes),
-                    total_bytes_on_disk=len(xorb_bytes),
-                )
-            )
-
-            # Build file term
-            unpacked = sum(xorb_c_sizes)
-            file_terms.append(
-                FileDataTerm(
-                    xorb_hash=x_hash,
-                    cas_flags=0,
-                    unpacked_bytes=unpacked,
-                    chunk_start=chunk_start_in_xorb,
-                    chunk_end=chunk_start_in_xorb + len(xorb_chunks),
-                )
-            )
-
-            # Verification hash for this term
-            v_hash = verification_hash(xorb_c_hashes)
-            term_verification_hashes.append(v_hash)
-
-            # Reset
-            xorb_chunks = []
-            xorb_c_hashes = []
-            xorb_c_sizes = []
-            chunk_start_in_xorb = 0
-
-        for i, c in enumerate(chunks):
-            xorb_chunks.append(c.data)
-            xorb_c_hashes.append(c_hashes[i])
-            xorb_c_sizes.append(c_sizes[i])
-
-            # Flush if too many chunks or too much data
-            if (
-                len(xorb_chunks) >= MAX_CHUNKS_PER_XORB
-                or sum(len(d) for d in xorb_chunks) >= XORB_MAX_BYTES // 2
-            ):
-                await _flush_xorb()
-                chunk_start_in_xorb = 0
-
-        # Flush remaining
-        await _flush_xorb()
-
-        # Step 6: Build and upload shard
-        fi = FileInfo(
-            file_hash=f_hash,
-            terms=file_terms,
-            verification_hashes=term_verification_hashes,
+        # Build shard (CPU-bound, offload to thread)
+        xorb_infos = [b.xorb_info for b in prepared.xorb_batches]
+        shard_bytes = await asyncio.to_thread(
+            build_shard, [prepared.file_info], xorb_infos
         )
-        shard_bytes = build_shard([fi], xorb_infos)
         await self.cas.upload_shard(conn, shard_bytes)
 
-        # Step 7: Register file with Hub
+        # Register file with Hub (network I/O)
         content_type = mimetypes.guess_type(key)[0] or "application/octet-stream"
         mtime_ms = int(time.time() * 1000)
 
@@ -226,16 +285,14 @@ class Bridge:
             add=[
                 {
                     "path": key,
-                    "xetHash": f_hash_hex,
+                    "xetHash": prepared.file_hash_hex,
                     "mtime": mtime_ms,
                     "contentType": content_type,
                 }
             ],
         )
 
-        # Compute ETag (MD5 of content, like S3)
-        etag = hashlib.md5(data).hexdigest()
-        return {"ETag": f'"{etag}"', "size": len(data)}
+        return {"ETag": f'"{prepared.etag}"', "size": len(data)}
 
     async def _put_empty_file(self, bucket_id: str, key: str) -> dict:
         """Handle zero-byte file (no Xet upload needed)."""
