@@ -1,8 +1,9 @@
-"""AWS Signature V4 verification for S3-compatible requests.
+"""AWS Signature V2 & V4 verification for S3-compatible requests.
 
-Supports both:
-1. Authorization header-based authentication (standard S3 API calls)
-2. Query-string authentication (presigned URLs)
+Supports:
+1. Authorization header-based authentication — SigV4 (standard S3 API calls)
+2. Query-string authentication — SigV4 presigned URLs (``X-Amz-Algorithm``)
+3. Query-string authentication — SigV2 presigned URLs (``AWSAccessKeyId``)
 
 Error codes returned match real AWS S3 behaviour:
 - ``AccessDenied``            — no credentials / expired presigned URL
@@ -12,9 +13,11 @@ Error codes returned match real AWS S3 behaviour:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -296,7 +299,7 @@ def _verify_query_auth(request: web.Request, config: Config) -> AuthError | None
                     "ServerTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 },
             )
-    except ValueError, OverflowError:
+    except (ValueError, OverflowError):
         return AuthError(403, "AccessDenied", "Access Denied")
 
     # ── canonical request ────────────────────────────────────────────
@@ -362,11 +365,143 @@ def _verify_query_auth(request: web.Request, config: Config) -> AuthError | None
     return None  # success
 
 
+# ── Query-string (presigned URL) auth — Signature V2 ────────────────────
+
+# Sub-resources that are part of the V2 canonical resource.
+_V2_SUB_RESOURCES = frozenset(
+    [
+        "acl",
+        "cors",
+        "delete",
+        "lifecycle",
+        "location",
+        "logging",
+        "notification",
+        "partNumber",
+        "policy",
+        "replication",
+        "requestPayment",
+        "response-cache-control",
+        "response-content-disposition",
+        "response-content-encoding",
+        "response-content-language",
+        "response-content-type",
+        "response-expires",
+        "restore",
+        "tagging",
+        "torrent",
+        "uploadId",
+        "uploads",
+        "versionId",
+        "versioning",
+        "versions",
+        "website",
+    ]
+)
+
+
+def _v2_canonical_resource(path: str, query: dict[str, str]) -> str:
+    """Build the S3 V2 CanonicalizedResource.
+
+    Format: ``/{bucket}/{key}[?sub-resource-params]``
+    """
+    canon = path or "/"
+    # Collect sub-resource query params that are part of the signature
+    sub_parts: list[str] = []
+    for key in sorted(query):
+        if key in _V2_SUB_RESOURCES:
+            val = query[key]
+            sub_parts.append(f"{key}={val}" if val else key)
+    if sub_parts:
+        canon += "?" + "&".join(sub_parts)
+    return canon
+
+
+def _verify_v2_query_auth(request: web.Request, config: Config) -> AuthError | None:
+    """Verify a presigned-URL (query-string) SigV2 request.
+
+    Query parameters: ``AWSAccessKeyId``, ``Signature``, ``Expires``.
+    Returns ``None`` on success or an :class:`AuthError` on failure.
+    """
+    query = request.query
+
+    access_key = query.get("AWSAccessKeyId", "")
+    signature = query.get("Signature", "")
+    expires = query.get("Expires", "")
+
+    if not all([access_key, signature, expires]):
+        return AuthError(403, "AccessDenied", "Access Denied")
+
+    if access_key != config.s3_access_key:
+        return AuthError(
+            403,
+            "InvalidAccessKeyId",
+            "The AWS Access Key Id you provided does not exist in our records.",
+            {"AWSAccessKeyId": access_key},
+        )
+
+    # ── expiration check ─────────────────────────────────────────────
+    try:
+        expires_ts = int(expires)
+        now_ts = int(time.time())
+        if now_ts > expires_ts:
+            return AuthError(
+                403,
+                "AccessDenied",
+                "Request has expired",
+                {"Expires": expires},
+            )
+    except (ValueError, OverflowError):
+        return AuthError(403, "AccessDenied", "Access Denied")
+
+    # ── string to sign ───────────────────────────────────────────────
+    # V2 presigned URLs: METHOD \n Content-MD5 \n Content-Type \n Expires \n CanonicalizedResource
+    # For query-string auth, Content-MD5 and Content-Type are empty.
+    method = request.method
+    content_md5 = ""
+    content_type = ""
+    canonical_resource = _v2_canonical_resource(request.path, dict(query))
+
+    string_to_sign = (
+        f"{method}\n{content_md5}\n{content_type}\n{expires}\n{canonical_resource}"
+    )
+
+    # ── signature ────────────────────────────────────────────────────
+    expected_sig = base64.b64encode(
+        hmac.new(
+            config.s3_secret_key.encode("utf-8"),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha1,
+        ).digest()
+    ).decode("utf-8")
+
+    if not hmac.compare_digest(expected_sig, signature):
+        logger.debug(
+            "SigV2 presigned auth mismatch\n  string_to_sign:\n%s\n  expected: %s\n  provided: %s",
+            string_to_sign,
+            expected_sig,
+            signature,
+        )
+        return AuthError(
+            403,
+            "SignatureDoesNotMatch",
+            "The request signature we calculated does not match the signature "
+            "you provided. Check your key and signing method.",
+            {
+                "AWSAccessKeyId": access_key,
+                "StringToSign": string_to_sign,
+                "SignatureProvided": signature,
+            },
+        )
+
+    return None  # success
+
+
 # ── public API ───────────────────────────────────────────────────────────
 
 
 def verify_request(request: web.Request, config: Config) -> AuthError | None:
-    """Check AWS SigV4 credentials on *request*.
+    """Check AWS SigV2/V4 credentials on *request*.
 
     Returns ``None`` when the request is authenticated, or an
     :class:`AuthError` describing the failure.
@@ -377,13 +512,16 @@ def verify_request(request: web.Request, config: Config) -> AuthError | None:
     if "X-Amz-Algorithm" in request.query:
         return _verify_query_auth(request, config)
 
+    if "AWSAccessKeyId" in request.query:
+        return _verify_v2_query_auth(request, config)
+
     # No credentials provided at all
     return AuthError(403, "AccessDenied", "Access Denied")
 
 
 @web.middleware
 async def s3_auth_middleware(request: web.Request, handler: object) -> web.Response:
-    """aiohttp middleware that enforces AWS Signature V4 on every request."""
+    """aiohttp middleware that enforces AWS Signature V2/V4 on every request."""
     config: Config = request.app["config"]
 
     err = verify_request(request, config)
