@@ -251,6 +251,16 @@ class Bridge:
         """
         bucket_id = self._bucket_id(bucket)
 
+        # S3 clients create "folders" by PUTting a zero-byte object with a
+        # trailing slash (e.g. "my-folder/").  HF Storage Buckets use virtual
+        # directories — they are inferred from file paths, not created
+        # explicitly — so the batch API rejects addFile for such paths (422).
+        # Return a synthetic success response instead.
+        if key.endswith("/") and len(data) == 0:
+            logger.info(f"PUT {key}: directory marker (virtual, no-op)")
+            etag = hashlib.md5(b"").hexdigest()
+            return {"ETag": f'"{etag}"', "size": 0}
+
         # Handle empty files
         if len(data) == 0:
             return await self._put_empty_file(bucket_id, key)

@@ -124,6 +124,27 @@ class TestPutObject:
         assert resp.headers.get("ETag") == '"abc123"'
         mock_bridge.put_object.assert_awaited_once()
 
+    async def test_put_folder_marker(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Creating a folder (trailing-slash, empty body) should succeed."""
+        etag = hashlib.md5(b"").hexdigest()
+        mock_bridge.put_object.return_value = {"ETag": f'"{etag}"', "size": 0}
+        resp = await client.put("/bucket/New Folder/", data=b"")
+        assert resp.status == 200
+        assert "ETag" in resp.headers
+        mock_bridge.put_object.assert_awaited_once_with("bucket", "New Folder/", b"")
+
+    async def test_put_nested_folder_marker(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Creating a nested folder should succeed."""
+        etag = hashlib.md5(b"").hexdigest()
+        mock_bridge.put_object.return_value = {"ETag": f'"{etag}"', "size": 0}
+        resp = await client.put("/bucket/parent/child/", data=b"")
+        assert resp.status == 200
+        mock_bridge.put_object.assert_awaited_once_with("bucket", "parent/child/", b"")
+
 
 class TestGetObject:
     async def test_get_existing_object(
@@ -211,6 +232,14 @@ class TestDeleteObject:
         resp = await client.delete("/bucket/key.txt")
         assert resp.status == 204
         mock_bridge.delete_object.assert_awaited_once_with("bucket", "key.txt")
+
+    async def test_delete_folder_key(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Deleting a folder-marker key (trailing slash) should succeed."""
+        resp = await client.delete("/bucket/New Folder/")
+        assert resp.status == 204
+        mock_bridge.delete_object.assert_awaited_once_with("bucket", "New Folder/")
 
 
 class TestHeadObject:

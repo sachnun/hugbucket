@@ -281,6 +281,9 @@ class HubClient:
             data=body.encode(),
             headers={"Content-Type": "application/x-ndjson"},
         ) as resp:
+            if resp.status >= 400:
+                error_body = await resp.text()
+                logger.error(f"Batch API error {resp.status}: {error_body}")
             resp.raise_for_status()
 
     # ---- Xet tokens ----

@@ -162,3 +162,49 @@ class TestUploadDownload:
             assert info is None or (isinstance(info, list) and len(info) == 0)
         finally:
             await bridge.delete_bucket(bucket_name)
+
+
+@pytest.mark.integration
+class TestDirectoryMarker:
+    """Test folder creation (directory marker) against live HF API."""
+
+    async def test_create_folder_marker(self, bridge: Bridge) -> None:
+        """PUT with trailing-slash empty body should succeed without hitting batch API."""
+        bucket_name = f"pytest-dm-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            # Create a folder marker — this should NOT hit the batch API (virtual no-op)
+            result = await bridge.put_object(bucket_name, "New Folder/", b"")
+            assert "ETag" in result
+            assert result["size"] == 0
+
+            # The folder marker should not be listed as a file
+            info = await bridge.head_object(bucket_name, "New Folder/")
+            assert info is None  # virtual directory, no file record
+
+        finally:
+            await bridge.delete_bucket(bucket_name)
+
+    async def test_files_under_folder_visible_in_listing(self, bridge: Bridge) -> None:
+        """Creating a folder marker then uploading files under it should list correctly."""
+        bucket_name = f"pytest-df-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            # Create folder marker (no-op), then real files inside
+            await bridge.put_object(bucket_name, "data/", b"")
+            await bridge.put_object(bucket_name, "data/file1.txt", b"hello")
+            await bridge.put_object(bucket_name, "data/file2.txt", b"world")
+
+            # List with prefix — should see the files
+            result = await bridge.list_objects(bucket_name, prefix="data/")
+            keys = {f.path for f in result["contents"]}
+            assert "data/file1.txt" in keys
+            assert "data/file2.txt" in keys
+
+            # Clean up
+            await bridge.delete_object(bucket_name, "data/file1.txt")
+            await bridge.delete_object(bucket_name, "data/file2.txt")
+        finally:
+            await bridge.delete_bucket(bucket_name)
