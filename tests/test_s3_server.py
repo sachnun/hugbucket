@@ -29,6 +29,7 @@ def mock_bridge() -> MagicMock:
     bridge.put_object = AsyncMock(return_value={"ETag": '"abc123"', "size": 0})
     bridge.get_object = AsyncMock(return_value=None)
     bridge.delete_object = AsyncMock()
+    bridge.delete_objects = AsyncMock(return_value=([], []))
     bridge.head_object = AsyncMock(return_value=None)
     bridge.list_objects = AsyncMock(
         return_value={
@@ -352,3 +353,81 @@ class TestMultipartUpload:
             data=b"<CompleteMultipartUpload/>",
         )
         assert resp.status == 404
+
+
+class TestDeleteObjects:
+    """Tests for S3 multi-object delete (POST /{bucket}?delete)."""
+
+    async def test_delete_multiple_objects(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        mock_bridge.delete_objects.return_value = (
+            ["file1.txt", "file2.txt", "dir/file3.txt"],
+            [],
+        )
+        body = """<?xml version="1.0" encoding="UTF-8"?>
+        <Delete>
+            <Object><Key>file1.txt</Key></Object>
+            <Object><Key>file2.txt</Key></Object>
+            <Object><Key>dir/file3.txt</Key></Object>
+        </Delete>"""
+        resp = await client.post("/my-bucket?delete", data=body.encode())
+        assert resp.status == 200
+        text = await resp.text()
+        assert "DeleteResult" in text
+        assert "file1.txt" in text
+        assert "file2.txt" in text
+        assert "dir/file3.txt" in text
+        mock_bridge.delete_objects.assert_awaited_once_with(
+            "my-bucket", ["file1.txt", "file2.txt", "dir/file3.txt"]
+        )
+
+    async def test_delete_objects_with_errors(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        mock_bridge.delete_objects.return_value = (
+            ["ok.txt"],
+            [{"key": "bad.txt", "code": "AccessDenied", "message": "Access Denied"}],
+        )
+        body = """<Delete>
+            <Object><Key>ok.txt</Key></Object>
+            <Object><Key>bad.txt</Key></Object>
+        </Delete>"""
+        resp = await client.post("/my-bucket?delete", data=body.encode())
+        assert resp.status == 200
+        text = await resp.text()
+        assert "ok.txt" in text
+        assert "AccessDenied" in text
+
+    async def test_delete_objects_malformed_xml(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        resp = await client.post("/my-bucket?delete", data=b"not xml")
+        assert resp.status == 400
+        text = await resp.text()
+        assert "MalformedXML" in text
+
+    async def test_delete_objects_no_keys(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        body = """<Delete></Delete>"""
+        resp = await client.post("/my-bucket?delete", data=body.encode())
+        assert resp.status == 400
+        text = await resp.text()
+        assert "MalformedXML" in text
+
+    async def test_delete_objects_with_namespace(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Keys in S3 namespace should be parsed correctly."""
+        mock_bridge.delete_objects.return_value = (["a.txt", "b.txt"], [])
+        body = """<?xml version="1.0" encoding="UTF-8"?>
+        <Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+            <Object><Key>a.txt</Key></Object>
+            <Object><Key>b.txt</Key></Object>
+        </Delete>"""
+        resp = await client.post("/bucket?delete", data=body.encode())
+        assert resp.status == 200
+        text = await resp.text()
+        assert "a.txt" in text
+        assert "b.txt" in text
