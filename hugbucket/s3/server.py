@@ -2,7 +2,8 @@
 
 Routes S3 REST API requests to the Bridge layer.
 Supports: ListBuckets, CreateBucket, DeleteBucket, HeadBucket,
-          ListObjectsV2, PutObject, GetObject, DeleteObject, HeadObject.
+          ListObjectsV2, PutObject, GetObject, DeleteObject, DeleteObjects,
+          HeadObject.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import mimetypes
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import unquote
+from xml.etree.ElementTree import fromstring
 
 from aiohttp import web
 
@@ -118,6 +120,10 @@ class S3Handler:
             if "list-type" in query:
                 return await self.handle_list_objects_v2(request, bucket)
 
+            # Multi-object delete: POST /{bucket}?delete
+            if request.method == "POST" and "delete" in query:
+                return await self.handle_delete_objects(request, bucket)
+
             # Bucket operations by method
             if request.method == "GET":
                 # Default GET on bucket = ListObjectsV2
@@ -204,6 +210,53 @@ class S3Handler:
             return web.Response(status=200)
         except Exception as e:
             logger.exception("HeadBucket failed")
+            return _s3_error(500, "InternalError", str(e))
+
+    async def handle_delete_objects(
+        self, request: web.Request, bucket: str
+    ) -> web.Response:
+        """Handle S3 multi-object delete (POST /{bucket}?delete).
+
+        Parses an XML body with a list of object keys and deletes them
+        in a single batch call.
+        """
+        try:
+            body = await request.read()
+            try:
+                root = fromstring(body)
+            except Exception:
+                return _s3_error(
+                    400, "MalformedXML", "The XML you provided was not well-formed."
+                )
+
+            # Parse <Object><Key>...</Key></Object> elements.
+            # The root tag may or may not have the S3 namespace.
+            ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+            keys: list[str] = []
+            for obj in root.findall("s3:Object", ns):
+                key_el = obj.find("s3:Key", ns)
+                if key_el is not None and key_el.text:
+                    keys.append(key_el.text)
+            # Also try without namespace (common in many clients)
+            if not keys:
+                for obj in root.findall("Object"):
+                    key_el = obj.find("Key")
+                    if key_el is not None and key_el.text:
+                        keys.append(key_el.text)
+
+            if not keys:
+                return _s3_error(
+                    400,
+                    "MalformedXML",
+                    "The XML you provided did not contain any Object/Key elements.",
+                )
+
+            deleted, errors = await self.bridge.delete_objects(bucket, keys)
+
+            body_xml = delete_result_xml(deleted, errors or None)
+            return web.Response(status=200, content_type=XML_CONTENT, body=body_xml)
+        except Exception as e:
+            logger.exception("DeleteObjects failed")
             return _s3_error(500, "InternalError", str(e))
 
     # ---- Object listing ----

@@ -392,6 +392,30 @@ class Bridge:
         bucket_id = self._bucket_id(bucket)
         await self.hub.batch_files(bucket_id, delete=[key])
 
+    async def delete_objects(
+        self, bucket: str, keys: list[str]
+    ) -> tuple[list[str], list[dict]]:
+        """Delete multiple objects in a single batch call.
+
+        Returns (deleted_keys, errors) where errors is a list of
+        {"key": ..., "code": ..., "message": ...} dicts.
+        """
+        bucket_id = self._bucket_id(bucket)
+        deleted: list[str] = []
+        errors: list[dict] = []
+        try:
+            await self.hub.batch_files(bucket_id, delete=keys)
+            deleted = list(keys)
+        except Exception as exc:
+            logger.exception("delete_objects batch failed")
+            # Report every key as failed so the caller can build a proper
+            # DeleteResult response.
+            for key in keys:
+                errors.append(
+                    {"key": key, "code": "InternalError", "message": str(exc)}
+                )
+        return deleted, errors
+
     async def head_object(self, bucket: str, key: str) -> BucketFile | None:
         """Get object metadata."""
         bucket_id = self._bucket_id(bucket)
