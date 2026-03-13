@@ -5,7 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
     paths:
-      - "src/**"
+      - "hugbucket/**"
       - "tests/**"
       - "Dockerfile"
       - ".dockerignore"

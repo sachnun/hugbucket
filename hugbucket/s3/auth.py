@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, unquote
 
+from collections.abc import Awaitable, Callable
+
 from aiohttp import web
 
 from hugbucket.config import Config
@@ -299,7 +301,7 @@ def _verify_query_auth(request: web.Request, config: Config) -> AuthError | None
                     "ServerTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 },
             )
-    except (ValueError, OverflowError):
+    except ValueError, OverflowError:
         return AuthError(403, "AccessDenied", "Access Denied")
 
     # ── canonical request ────────────────────────────────────────────
@@ -451,7 +453,7 @@ def _verify_v2_query_auth(request: web.Request, config: Config) -> AuthError | N
                 "Request has expired",
                 {"Expires": expires},
             )
-    except (ValueError, OverflowError):
+    except ValueError, OverflowError:
         return AuthError(403, "AccessDenied", "Access Denied")
 
     # ── string to sign ───────────────────────────────────────────────
@@ -520,7 +522,10 @@ def verify_request(request: web.Request, config: Config) -> AuthError | None:
 
 
 @web.middleware
-async def s3_auth_middleware(request: web.Request, handler: object) -> web.Response:
+async def s3_auth_middleware(
+    request: web.Request,
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> web.StreamResponse:
     """aiohttp middleware that enforces AWS Signature V2/V4 on every request."""
     config: Config = request.app["config"]
 
