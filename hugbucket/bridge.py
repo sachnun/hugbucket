@@ -432,6 +432,51 @@ class Bridge:
         files = await self.hub.get_paths_info(bucket_id, [key])
         return files[0] if files else None
 
+    async def copy_object(
+        self,
+        src_bucket: str,
+        src_key: str,
+        dst_bucket: str,
+        dst_key: str,
+    ) -> dict:
+        """Copy an object by registering the destination path with the same xetHash.
+
+        Because Xet uses content-addressable storage, we don't need to
+        re-download and re-upload the data — just register a new path
+        pointing to the same content hash.
+
+        Returns {"ETag": ..., "LastModified": ...}.
+        """
+        src_bucket_id = self._bucket_id(src_bucket)
+        dst_bucket_id = self._bucket_id(dst_bucket)
+
+        # Get source file metadata
+        files = await self.hub.get_paths_info(src_bucket_id, [src_key])
+        if not files:
+            raise FileNotFoundError(f"Source object not found: {src_bucket}/{src_key}")
+        src_file = files[0]
+
+        # Register the new path with the same content hash
+        content_type = mimetypes.guess_type(dst_key)[0] or "application/octet-stream"
+        mtime_ms = int(time.time() * 1000)
+
+        await self.hub.batch_files(
+            dst_bucket_id,
+            add=[
+                {
+                    "path": dst_key,
+                    "xetHash": src_file.xet_hash,
+                    "mtime": mtime_ms,
+                    "contentType": content_type,
+                }
+            ],
+        )
+
+        etag = f'"{src_file.xet_hash[:32]}"'
+        last_modified = src_file.mtime or src_file.uploaded_at or ""
+        logger.info(f"COPY {src_bucket}/{src_key} -> {dst_bucket}/{dst_key}")
+        return {"ETag": etag, "LastModified": last_modified}
+
     async def list_objects(
         self,
         bucket: str,

@@ -2,8 +2,8 @@
 
 Routes S3 REST API requests to the Bridge layer.
 Supports: ListBuckets, CreateBucket, DeleteBucket, HeadBucket,
-          ListObjectsV2, PutObject, GetObject, DeleteObject, DeleteObjects,
-          HeadObject.
+          ListObjectsV2, PutObject, CopyObject, GetObject, DeleteObject,
+          DeleteObjects, HeadObject.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from hugbucket.s3.xml_responses import (
     list_objects_v2_xml,
     error_xml,
     delete_result_xml,
+    copy_object_result_xml,
     initiate_multipart_upload_xml,
     complete_multipart_upload_xml,
 )
@@ -152,6 +153,8 @@ class S3Handler:
         elif request.method == "PUT":
             if "partNumber" in query and "uploadId" in query:
                 return await self.handle_upload_part(request, bucket, key)
+            if "x-amz-copy-source" in request.headers:
+                return await self.handle_copy_object(request, bucket, key)
             return await self.handle_put_object(request, bucket, key)
         elif request.method == "DELETE":
             if "uploadId" in query:
@@ -322,6 +325,47 @@ class S3Handler:
             )
         except Exception as e:
             logger.exception("PutObject failed")
+            return _s3_error(500, "InternalError", str(e))
+
+    async def handle_copy_object(
+        self, request: web.Request, bucket: str, key: str
+    ) -> web.Response:
+        """Handle S3 CopyObject (PUT with x-amz-copy-source header).
+
+        Parses the source bucket/key from the header and delegates to
+        bridge.copy_object which performs a server-side "copy" by
+        registering the new path with the same Xet content hash.
+        """
+        copy_source = ""
+        try:
+            # x-amz-copy-source format: /bucket/key or bucket/key
+            copy_source = unquote(request.headers["x-amz-copy-source"])
+            copy_source = copy_source.lstrip("/")
+            parts = copy_source.split("/", 1)
+            if len(parts) < 2 or not parts[1]:
+                return _s3_error(
+                    400,
+                    "InvalidArgument",
+                    "Invalid x-amz-copy-source header.",
+                )
+            src_bucket, src_key = parts[0], parts[1]
+
+            result = await self.bridge.copy_object(src_bucket, src_key, bucket, key)
+
+            body = copy_object_result_xml(
+                etag=result["ETag"],
+                last_modified=result.get("LastModified", ""),
+            )
+            return web.Response(status=200, content_type=XML_CONTENT, body=body)
+        except FileNotFoundError:
+            return _s3_error(
+                404,
+                "NoSuchKey",
+                "The specified source key does not exist.",
+                resource=copy_source,
+            )
+        except Exception as e:
+            logger.exception("CopyObject failed")
             return _s3_error(500, "InternalError", str(e))
 
     async def handle_get_object(

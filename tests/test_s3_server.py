@@ -31,6 +31,9 @@ def mock_bridge() -> MagicMock:
     bridge.delete_object = AsyncMock()
     bridge.delete_objects = AsyncMock(return_value=([], []))
     bridge.head_object = AsyncMock(return_value=None)
+    bridge.copy_object = AsyncMock(
+        return_value={"ETag": '"abc123"', "LastModified": "2026-01-01T00:00:00Z"}
+    )
     bridge.list_objects = AsyncMock(
         return_value={
             "contents": [],
@@ -146,6 +149,82 @@ class TestPutObject:
         mock_bridge.put_object.assert_awaited_once_with("bucket", "parent/child/", b"")
 
 
+class TestDeleteObject:
+    async def test_delete(self, client: TestClient, mock_bridge: MagicMock) -> None:
+        resp = await client.delete("/bucket/key.txt")
+        assert resp.status == 204
+        mock_bridge.delete_object.assert_awaited_once_with("bucket", "key.txt")
+
+    async def test_delete_folder_key(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Deleting a folder-marker key (trailing slash) should succeed."""
+        resp = await client.delete("/bucket/New Folder/")
+        assert resp.status == 204
+        mock_bridge.delete_object.assert_awaited_once_with("bucket", "New Folder/")
+
+
+class TestCopyObject:
+    async def test_copy_object(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """PUT with x-amz-copy-source should copy the object."""
+        mock_bridge.copy_object.return_value = {
+            "ETag": '"abc123"',
+            "LastModified": "2026-01-01T00:00:00Z",
+        }
+        resp = await client.put(
+            "/dst-bucket/dst-key.txt",
+            headers={"x-amz-copy-source": "/src-bucket/src-key.txt"},
+        )
+        assert resp.status == 200
+        body = await resp.read()
+        root = fromstring(body)
+        ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+        assert root.find("s3:ETag", ns) is not None
+        mock_bridge.copy_object.assert_awaited_once_with(
+            "src-bucket", "src-key.txt", "dst-bucket", "dst-key.txt"
+        )
+
+    async def test_copy_object_url_encoded_source(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """x-amz-copy-source with URL-encoded path should be decoded."""
+        mock_bridge.copy_object.return_value = {
+            "ETag": '"def456"',
+            "LastModified": "",
+        }
+        resp = await client.put(
+            "/bucket/new%20name.txt",
+            headers={"x-amz-copy-source": "/bucket/old%20name.txt"},
+        )
+        assert resp.status == 200
+        mock_bridge.copy_object.assert_awaited_once_with(
+            "bucket", "old name.txt", "bucket", "new name.txt"
+        )
+
+    async def test_copy_object_source_not_found(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """CopyObject with nonexistent source returns 404."""
+        mock_bridge.copy_object.side_effect = FileNotFoundError("not found")
+        resp = await client.put(
+            "/bucket/dest.txt",
+            headers={"x-amz-copy-source": "/bucket/missing.txt"},
+        )
+        assert resp.status == 404
+
+    async def test_copy_object_invalid_source(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """CopyObject with invalid x-amz-copy-source returns 400."""
+        resp = await client.put(
+            "/bucket/dest.txt",
+            headers={"x-amz-copy-source": "no-key"},
+        )
+        assert resp.status == 400
+
+
 class TestGetObject:
     async def test_get_existing_object(
         self, client: TestClient, mock_bridge: MagicMock
@@ -225,21 +304,6 @@ class TestGetObject:
         assert resp.status == 206
         body = await resp.read()
         assert body == b"56789"
-
-
-class TestDeleteObject:
-    async def test_delete(self, client: TestClient, mock_bridge: MagicMock) -> None:
-        resp = await client.delete("/bucket/key.txt")
-        assert resp.status == 204
-        mock_bridge.delete_object.assert_awaited_once_with("bucket", "key.txt")
-
-    async def test_delete_folder_key(
-        self, client: TestClient, mock_bridge: MagicMock
-    ) -> None:
-        """Deleting a folder-marker key (trailing slash) should succeed."""
-        resp = await client.delete("/bucket/New Folder/")
-        assert resp.status == 204
-        mock_bridge.delete_object.assert_awaited_once_with("bucket", "New Folder/")
 
 
 class TestHeadObject:

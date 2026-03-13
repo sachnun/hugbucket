@@ -208,3 +208,120 @@ class TestDirectoryMarker:
             await bridge.delete_object(bucket_name, "data/file2.txt")
         finally:
             await bridge.delete_bucket(bucket_name)
+
+
+@pytest.mark.integration
+class TestCopyObject:
+    """Test copy_object and rename (copy+delete) against live HF API."""
+
+    async def test_copy_file_same_bucket(self, bridge: Bridge) -> None:
+        """Copy a file within the same bucket — data should be identical."""
+        bucket_name = f"pytest-cp-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            # Upload original
+            data = os.urandom(5 * 1024)
+            await bridge.put_object(bucket_name, "original.bin", data)
+
+            # Copy
+            result = await bridge.copy_object(
+                bucket_name, "original.bin", bucket_name, "copied.bin"
+            )
+            assert "ETag" in result
+
+            # Verify copied file exists with same size
+            info = await bridge.head_object(bucket_name, "copied.bin")
+            assert info is not None
+            assert info.size == len(data)
+
+            # Download and verify identical content
+            downloaded = await bridge.get_object(bucket_name, "copied.bin")
+            assert downloaded == data
+
+            # Clean up
+            await bridge.delete_object(bucket_name, "original.bin")
+            await bridge.delete_object(bucket_name, "copied.bin")
+        finally:
+            await bridge.delete_bucket(bucket_name)
+
+    async def test_rename_file(self, bridge: Bridge) -> None:
+        """Rename = copy + delete. The old key should disappear, new key should exist."""
+        bucket_name = f"pytest-rn-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            # Upload
+            data = b"rename me please"
+            await bridge.put_object(bucket_name, "old-name.txt", data)
+
+            # Rename: copy to new name, then delete old
+            await bridge.copy_object(
+                bucket_name, "old-name.txt", bucket_name, "new-name.txt"
+            )
+            await bridge.delete_object(bucket_name, "old-name.txt")
+
+            # Old key should be gone
+            old_info = await bridge.head_object(bucket_name, "old-name.txt")
+            assert old_info is None
+
+            # New key should exist with same data
+            new_info = await bridge.head_object(bucket_name, "new-name.txt")
+            assert new_info is not None
+            assert new_info.size == len(data)
+
+            downloaded = await bridge.get_object(bucket_name, "new-name.txt")
+            assert downloaded == data
+
+            # Clean up
+            await bridge.delete_object(bucket_name, "new-name.txt")
+        finally:
+            await bridge.delete_bucket(bucket_name)
+
+    async def test_copy_nonexistent_raises(self, bridge: Bridge) -> None:
+        """Copying a nonexistent source should raise FileNotFoundError."""
+        bucket_name = f"pytest-cn-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            with pytest.raises(FileNotFoundError):
+                await bridge.copy_object(
+                    bucket_name, "ghost.txt", bucket_name, "dst.txt"
+                )
+        finally:
+            await bridge.delete_bucket(bucket_name)
+
+    async def test_rename_into_subfolder(self, bridge: Bridge) -> None:
+        """Rename (move) a file into a subfolder path."""
+        bucket_name = f"pytest-rf-{int(time.time()) % 100000}"
+        try:
+            await bridge.create_bucket(bucket_name)
+
+            data = b"moving to subfolder"
+            await bridge.put_object(bucket_name, "root-file.txt", data)
+
+            # Move into subfolder
+            await bridge.copy_object(
+                bucket_name,
+                "root-file.txt",
+                bucket_name,
+                "subfolder/root-file.txt",
+            )
+            await bridge.delete_object(bucket_name, "root-file.txt")
+
+            # Verify
+            old = await bridge.head_object(bucket_name, "root-file.txt")
+            assert old is None
+
+            new = await bridge.head_object(bucket_name, "subfolder/root-file.txt")
+            assert new is not None
+            assert new.size == len(data)
+
+            # List with delimiter to verify subfolder appears
+            result = await bridge.list_objects(bucket_name, delimiter="/")
+            assert "subfolder/" in result["common_prefixes"]
+
+            # Clean up
+            await bridge.delete_object(bucket_name, "subfolder/root-file.txt")
+        finally:
+            await bridge.delete_bucket(bucket_name)

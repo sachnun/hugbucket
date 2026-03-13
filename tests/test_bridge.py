@@ -97,3 +97,103 @@ class TestDirectoryMarkers:
         # Should have uploaded via Xet
         mock_hub.get_xet_write_token.assert_awaited_once()
         mock_hub.batch_files.assert_awaited_once()
+
+
+class TestCopyObject:
+    """Test bridge.copy_object — server-side copy via xetHash reuse."""
+
+    async def test_copy_registers_new_path_with_same_hash(
+        self, bridge, mock_hub: MagicMock
+    ) -> None:
+        """copy_object should register the dest path with the source's xetHash."""
+        src_file = BucketFile(
+            type="file",
+            path="src.txt",
+            size=100,
+            xet_hash="a" * 64,
+            mtime="2026-01-01T00:00:00Z",
+        )
+        mock_hub.get_paths_info.return_value = [src_file]
+
+        result = await bridge.copy_object("mybucket", "src.txt", "mybucket", "dst.txt")
+
+        assert "ETag" in result
+        assert "LastModified" in result
+
+        # Verify batch_files was called with the same xetHash
+        mock_hub.batch_files.assert_awaited_once()
+        call_args = mock_hub.batch_files.call_args
+        add_list = call_args.kwargs.get("add") or call_args[1].get("add")
+        assert len(add_list) == 1
+        assert add_list[0]["path"] == "dst.txt"
+        assert add_list[0]["xetHash"] == "a" * 64
+
+    async def test_copy_does_not_download_data(
+        self, bridge, mock_hub: MagicMock, mock_cas: MagicMock
+    ) -> None:
+        """copy_object must NOT download the file — only metadata lookup + batch."""
+        src_file = BucketFile(
+            type="file",
+            path="big.bin",
+            size=1_000_000_000,
+            xet_hash="b" * 64,
+            mtime="2026-01-01T00:00:00Z",
+        )
+        mock_hub.get_paths_info.return_value = [src_file]
+
+        await bridge.copy_object("mybucket", "big.bin", "mybucket", "big-copy.bin")
+
+        # No Xet read/write token, no CAS operations
+        mock_hub.get_xet_write_token.assert_not_awaited()
+
+    async def test_copy_source_not_found_raises(
+        self, bridge, mock_hub: MagicMock
+    ) -> None:
+        """copy_object should raise FileNotFoundError if source doesn't exist."""
+        mock_hub.get_paths_info.return_value = []
+
+        with pytest.raises(FileNotFoundError):
+            await bridge.copy_object("mybucket", "missing.txt", "mybucket", "dst.txt")
+        mock_hub.batch_files.assert_not_awaited()
+
+    async def test_copy_cross_bucket(self, bridge, mock_hub: MagicMock) -> None:
+        """copy_object should work across different buckets."""
+        src_file = BucketFile(
+            type="file",
+            path="data.bin",
+            size=500,
+            xet_hash="c" * 64,
+            mtime="2026-06-01T00:00:00Z",
+        )
+        mock_hub.get_paths_info.return_value = [src_file]
+
+        result = await bridge.copy_object(
+            "src-bucket", "data.bin", "dst-bucket", "copied.bin"
+        )
+        assert result["ETag"] == f'"{"c" * 32}"'
+
+        # Verify get_paths_info used src bucket, batch_files used dst bucket
+        get_call = mock_hub.get_paths_info.call_args
+        assert "src-bucket" in get_call[0][0]
+
+        batch_call = mock_hub.batch_files.call_args
+        assert "dst-bucket" in batch_call[0][0]
+
+    async def test_copy_preserves_content_type_from_dest_key(
+        self, bridge, mock_hub: MagicMock
+    ) -> None:
+        """copy_object should guess content type from the destination key."""
+        src_file = BucketFile(
+            type="file",
+            path="photo.dat",
+            size=1024,
+            xet_hash="d" * 64,
+            mtime="2026-01-01T00:00:00Z",
+        )
+        mock_hub.get_paths_info.return_value = [src_file]
+
+        await bridge.copy_object("mybucket", "photo.dat", "mybucket", "photo.jpg")
+
+        call_args = mock_hub.batch_files.call_args
+        add_list = call_args.kwargs.get("add") or call_args[1].get("add")
+        assert add_list[0]["contentType"] == "image/jpeg"
