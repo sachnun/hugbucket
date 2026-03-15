@@ -34,3 +34,8 @@ class Config:
     xet_chunk_min: int = 8192  # 8 KiB
     xet_chunk_max: int = 131072  # 128 KiB
     xet_xorb_max_bytes: int = 67108864  # 64 MiB
+
+    # Concurrency / connection-pool settings
+    # Total outbound connections shared across all concurrent downloads.
+    # 0 = unlimited (no cap on simultaneous outbound connections).
+    http_pool_size: int = 0

@@ -46,11 +46,19 @@ class Reconstruction:
 class CASClient:
     """Async client for Xet CAS endpoints."""
 
+    pool_size: int = 0  # 0 = unlimited
     _session: aiohttp.ClientSession | None = field(default=None, repr=False)
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(raise_for_status=False)
+            connector = aiohttp.TCPConnector(
+                limit=self.pool_size,
+                enable_cleanup_closed=True,
+            )
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                raise_for_status=False,
+            )
         return self._session
 
     async def close(self) -> None:

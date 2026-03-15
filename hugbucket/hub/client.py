@@ -60,7 +60,12 @@ class HubClient:
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(
+                limit=self.config.http_pool_size,
+                enable_cleanup_closed=True,
+            )
             self._session = aiohttp.ClientSession(
+                connector=connector,
                 headers=self._headers(),
                 raise_for_status=False,
             )

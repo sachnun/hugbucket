@@ -209,7 +209,7 @@ class Bridge:
 
     def __post_init__(self) -> None:
         self.hub = HubClient(config=self.config)
-        self.cas = CASClient()
+        self.cas = CASClient(pool_size=self.config.http_pool_size)
 
     async def close(self) -> None:
         await self.hub.close()
