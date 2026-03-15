@@ -7,6 +7,7 @@ focusing on correct S3 protocol behavior.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 from xml.etree.ElementTree import fromstring
 
@@ -16,6 +17,12 @@ from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
 from hugbucket.hub.client import BucketInfo, BucketFile
 from hugbucket.s3.server import S3Handler
+
+
+async def _async_chunks(*chunks: bytes) -> AsyncIterator[bytes]:
+    """Helper: create an async iterator yielding the given byte chunks."""
+    for chunk in chunks:
+        yield chunk
 
 
 @pytest.fixture
@@ -28,6 +35,7 @@ def mock_bridge() -> MagicMock:
     bridge.head_bucket = AsyncMock(return_value=None)
     bridge.put_object = AsyncMock(return_value={"ETag": '"abc123"', "size": 0})
     bridge.get_object = AsyncMock(return_value=None)
+    bridge.get_object_stream = AsyncMock(return_value=None)
     bridge.delete_object = AsyncMock()
     bridge.delete_objects = AsyncMock(return_value=([], []))
     bridge.head_object = AsyncMock(return_value=None)
@@ -230,7 +238,6 @@ class TestGetObject:
         self, client: TestClient, mock_bridge: MagicMock
     ) -> None:
         test_data = b"hello world"
-        mock_bridge.get_object.return_value = test_data
         mock_bridge.head_object.return_value = BucketFile(
             type="file",
             path="key.txt",
@@ -238,6 +245,7 @@ class TestGetObject:
             xet_hash="a" * 64,
             mtime="2026-01-01T00:00:00Z",
         )
+        mock_bridge.get_object_stream.return_value = _async_chunks(test_data)
         resp = await client.get("/bucket/key.txt")
         assert resp.status == 200
         body = await resp.read()
@@ -248,7 +256,7 @@ class TestGetObject:
     async def test_get_missing_object(
         self, client: TestClient, mock_bridge: MagicMock
     ) -> None:
-        mock_bridge.get_object.return_value = None
+        mock_bridge.head_object.return_value = None
         resp = await client.get("/bucket/missing.txt")
         assert resp.status == 404
         body = await resp.text()
@@ -258,7 +266,6 @@ class TestGetObject:
         self, client: TestClient, mock_bridge: MagicMock
     ) -> None:
         test_data = b"0123456789"
-        mock_bridge.get_object.return_value = test_data
         mock_bridge.head_object.return_value = BucketFile(
             type="file",
             path="data.bin",
@@ -266,6 +273,7 @@ class TestGetObject:
             xet_hash="b" * 64,
             mtime="2026-01-01T00:00:00Z",
         )
+        mock_bridge.get_object_stream.return_value = _async_chunks(test_data)
         resp = await client.get("/bucket/data.bin", headers={"Range": "bytes=2-5"})
         assert resp.status == 206
         body = await resp.read()
@@ -275,8 +283,6 @@ class TestGetObject:
     async def test_range_request_out_of_bounds(
         self, client: TestClient, mock_bridge: MagicMock
     ) -> None:
-        test_data = b"short"
-        mock_bridge.get_object.return_value = test_data
         mock_bridge.head_object.return_value = BucketFile(
             type="file",
             path="data.bin",
@@ -284,6 +290,7 @@ class TestGetObject:
             xet_hash="c" * 64,
             mtime="2026-01-01T00:00:00Z",
         )
+        mock_bridge.get_object_stream.return_value = _async_chunks(b"short")
         resp = await client.get("/bucket/data.bin", headers={"Range": "bytes=100-200"})
         assert resp.status == 416
 
@@ -292,7 +299,6 @@ class TestGetObject:
     ) -> None:
         """bytes=5- means from byte 5 to end."""
         test_data = b"0123456789"
-        mock_bridge.get_object.return_value = test_data
         mock_bridge.head_object.return_value = BucketFile(
             type="file",
             path="data.bin",
@@ -300,10 +306,52 @@ class TestGetObject:
             xet_hash="d" * 64,
             mtime="2026-01-01T00:00:00Z",
         )
+        mock_bridge.get_object_stream.return_value = _async_chunks(test_data)
         resp = await client.get("/bucket/data.bin", headers={"Range": "bytes=5-"})
         assert resp.status == 206
         body = await resp.read()
         assert body == b"56789"
+
+    async def test_streaming_multi_chunk(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Verify that multiple chunks are streamed and reassembled correctly."""
+        mock_bridge.head_object.return_value = BucketFile(
+            type="file",
+            path="multi.bin",
+            size=16,
+            xet_hash="e" * 64,
+            mtime="2026-01-01T00:00:00Z",
+        )
+        mock_bridge.get_object_stream.return_value = _async_chunks(
+            b"Hello", b" ", b"World", b"!!!!!"
+        )
+        resp = await client.get("/bucket/multi.bin")
+        assert resp.status == 200
+        body = await resp.read()
+        assert body == b"Hello World!!!!!"
+
+    async def test_range_across_multiple_chunks(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Range request that spans across multiple streamed chunks."""
+        # Data: "AAAAABBBBBCCCCC" (3 chunks of 5 bytes each)
+        mock_bridge.head_object.return_value = BucketFile(
+            type="file",
+            path="chunked.bin",
+            size=15,
+            xet_hash="f" * 64,
+            mtime="2026-01-01T00:00:00Z",
+        )
+        mock_bridge.get_object_stream.return_value = _async_chunks(
+            b"AAAAA", b"BBBBB", b"CCCCC"
+        )
+        # Request bytes 3-11 → "AABBBBBCC"
+        resp = await client.get("/bucket/chunked.bin", headers={"Range": "bytes=3-11"})
+        assert resp.status == 206
+        body = await resp.read()
+        assert body == b"AABBBBBCC"
+        assert resp.headers["Content-Range"] == "bytes 3-11/15"
 
 
 class TestHeadObject:

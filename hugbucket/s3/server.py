@@ -370,12 +370,22 @@ class S3Handler:
 
     async def handle_get_object(
         self, request: web.Request, bucket: str, key: str
-    ) -> web.Response:
+    ) -> web.Response | web.StreamResponse:
         try:
-            # Get metadata first for Last-Modified
+            # Get metadata first for headers and 404 check
             file_info = await self.bridge.head_object(bucket, key)
-            data = await self.bridge.get_object(bucket, key)
-            if data is None:
+            if file_info is None:
+                return _s3_error(
+                    404,
+                    "NoSuchKey",
+                    "The specified key does not exist.",
+                    resource=f"/{bucket}/{key}",
+                )
+
+            stream = await self.bridge.get_object_stream(
+                bucket, key, file_info=file_info
+            )
+            if stream is None:
                 return _s3_error(
                     404,
                     "NoSuchKey",
@@ -385,57 +395,91 @@ class S3Handler:
 
             etag = (
                 f'"{file_info.xet_hash[:32]}"'
-                if file_info and file_info.xet_hash
-                else f'"{hashlib.md5(data).hexdigest()}"'
+                if file_info.xet_hash
+                else f'"{hashlib.md5(b"").hexdigest()}"'
             )
             content_type = mimetypes.guess_type(key)[0] or "application/octet-stream"
             last_modified = _format_last_modified(
                 file_info.mtime or file_info.uploaded_at if file_info else None
             )
+            total_size = file_info.size
 
             # Handle Range requests
             range_header = request.headers.get("Range", "")
             if range_header and range_header.startswith("bytes="):
                 range_spec = range_header[6:]  # strip "bytes="
                 parts = range_spec.split("-")
-                total = len(data)
                 start = int(parts[0]) if parts[0] else 0
-                end = int(parts[1]) if parts[1] else total - 1
-                end = min(end, total - 1)
+                end = int(parts[1]) if parts[1] else total_size - 1
+                end = min(end, total_size - 1)
 
-                if start >= total or start > end:
+                if start >= total_size or start > end:
                     return web.Response(
                         status=416,
                         headers={
-                            "Content-Range": f"bytes */{total}",
+                            "Content-Range": f"bytes */{total_size}",
                         },
                     )
 
-                slice_data = data[start : end + 1]
-                return web.Response(
+                slice_length = end - start + 1
+                response = web.StreamResponse(
                     status=206,
-                    body=slice_data,
-                    content_type=content_type,
                     headers={
                         "ETag": etag,
-                        "Content-Length": str(len(slice_data)),
-                        "Content-Range": f"bytes {start}-{end}/{total}",
+                        "Content-Length": str(slice_length),
+                        "Content-Range": f"bytes {start}-{end}/{total_size}",
                         "Accept-Ranges": "bytes",
                         "Last-Modified": last_modified,
                     },
                 )
+                response.content_type = content_type
+                await response.prepare(request)
 
-            return web.Response(
+                offset = 0
+                bytes_written = 0
+                async for chunk in stream:
+                    chunk_end = offset + len(chunk) - 1
+
+                    # Skip chunks entirely before range
+                    if chunk_end < start:
+                        offset += len(chunk)
+                        continue
+                    # Stop if we've passed the range
+                    if offset > end:
+                        break
+
+                    # Slice the portion of this chunk within [start, end]
+                    slice_start = max(0, start - offset)
+                    slice_end = min(len(chunk), end - offset + 1)
+
+                    await response.write(chunk[slice_start:slice_end])
+                    bytes_written += slice_end - slice_start
+                    offset += len(chunk)
+
+                    if bytes_written >= slice_length:
+                        break
+
+                await response.write_eof()
+                return response
+
+            # Full download — stream chunk by chunk
+            response = web.StreamResponse(
                 status=200,
-                body=data,
-                content_type=content_type,
                 headers={
                     "ETag": etag,
-                    "Content-Length": str(len(data)),
+                    "Content-Length": str(total_size),
                     "Accept-Ranges": "bytes",
                     "Last-Modified": last_modified,
                 },
             )
+            response.content_type = content_type
+            await response.prepare(request)
+
+            async for chunk in stream:
+                await response.write(chunk)
+
+            await response.write_eof()
+            return response
         except Exception as e:
             logger.exception("GetObject failed")
             return _s3_error(500, "InternalError", str(e))

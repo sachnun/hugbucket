@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import quote
@@ -167,6 +168,10 @@ def config() -> Config:
 
 @pytest.fixture
 def mock_bridge() -> MagicMock:
+    async def _async_chunks(*chunks: bytes) -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+
     bridge = MagicMock()
     bridge.list_buckets = AsyncMock(return_value=[])
     bridge.create_bucket = AsyncMock(return_value="")
@@ -174,6 +179,7 @@ def mock_bridge() -> MagicMock:
     bridge.head_bucket = AsyncMock(return_value=None)
     bridge.put_object = AsyncMock(return_value={"ETag": '"abc123"', "size": 0})
     bridge.get_object = AsyncMock(return_value=b"hello")
+    bridge.get_object_stream = AsyncMock(return_value=_async_chunks(b"hello"))
     bridge.delete_object = AsyncMock()
     bridge.head_object = AsyncMock(
         return_value=BucketFile(

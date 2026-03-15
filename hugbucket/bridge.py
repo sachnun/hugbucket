@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import AsyncIterator
 import logging
 import mimetypes
 import time
@@ -407,6 +408,69 @@ class Bridge:
                 break  # Only need one fetch per term
 
         return b"".join(result_parts)
+
+    async def get_object_stream(
+        self,
+        bucket: str,
+        key: str,
+        file_info: BucketFile | None = None,
+    ) -> AsyncIterator[bytes] | None:
+        """Stream an object chunk by chunk instead of buffering the entire file.
+
+        Returns an async iterator that yields decompressed chunks, or None
+        if the object does not exist.  When *file_info* is supplied the
+        initial ``get_paths_info`` round-trip is skipped (the caller
+        typically already has it from ``head_object``).
+        """
+        bucket_id = self._bucket_id(bucket)
+
+        if file_info is None:
+            files = await self.hub.get_paths_info(bucket_id, [key])
+            if not files:
+                return None
+            file_info = files[0]
+
+        if file_info.size == 0:
+
+            async def _empty() -> AsyncIterator[bytes]:
+                yield b""
+
+            return _empty()
+
+        conn = await self.hub.get_xet_read_token(bucket_id)
+        recon = await self.cas.get_reconstruction(conn, file_info.xet_hash)
+
+        async def _stream() -> AsyncIterator[bytes]:
+            first_term = True
+            for term in recon.terms:
+                fetches = recon.fetch_info.get(term.hash, [])
+                for fetch in fetches:
+                    if (
+                        fetch.range_start > term.range_end
+                        or fetch.range_end < term.range_start
+                    ):
+                        continue
+
+                    xorb_bytes = await self.cas.fetch_xorb_range(fetch)
+                    xorb_chunks = deserialize_xorb(xorb_bytes)
+
+                    for ci in range(term.range_start, term.range_end):
+                        local_idx = ci - fetch.range_start
+                        if 0 <= local_idx < len(xorb_chunks):
+                            chunk_bytes = xorb_chunks[local_idx].uncompressed_data
+
+                            if first_term and recon.offset_into_first_range > 0:
+                                chunk_bytes = chunk_bytes[
+                                    recon.offset_into_first_range :
+                                ]
+                                first_term = False
+                            else:
+                                first_term = False
+
+                            yield chunk_bytes
+                    break  # Only need one fetch per term
+
+        return _stream()
 
     async def delete_object(self, bucket: str, key: str) -> None:
         """Delete an object."""
