@@ -39,3 +39,8 @@ class Config:
     # Total outbound connections shared across all concurrent downloads.
     # 0 = unlimited (no cap on simultaneous outbound connections).
     http_pool_size: int = 0
+
+    # Cache settings
+    xorb_cache_max_bytes: int = 512 * 1024 * 1024  # 512 MiB
+    recon_cache_max_entries: int = 1024
+    recon_cache_ttl: int = 300  # 5 minutes

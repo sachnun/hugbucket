@@ -265,7 +265,6 @@ class TestGetObject:
     async def test_range_request(
         self, client: TestClient, mock_bridge: MagicMock
     ) -> None:
-        test_data = b"0123456789"
         mock_bridge.head_object.return_value = BucketFile(
             type="file",
             path="data.bin",
@@ -273,7 +272,8 @@ class TestGetObject:
             xet_hash="b" * 64,
             mtime="2026-01-01T00:00:00Z",
         )
-        mock_bridge.get_object_stream.return_value = _async_chunks(test_data)
+        # Bridge returns already-trimmed data for byte_range=(2,5)
+        mock_bridge.get_object_stream.return_value = _async_chunks(b"2345")
         resp = await client.get("/bucket/data.bin", headers={"Range": "bytes=2-5"})
         assert resp.status == 206
         body = await resp.read()
@@ -290,7 +290,7 @@ class TestGetObject:
             xet_hash="c" * 64,
             mtime="2026-01-01T00:00:00Z",
         )
-        mock_bridge.get_object_stream.return_value = _async_chunks(b"short")
+        # 416 is returned before get_object_stream is called
         resp = await client.get("/bucket/data.bin", headers={"Range": "bytes=100-200"})
         assert resp.status == 416
 
@@ -298,7 +298,6 @@ class TestGetObject:
         self, client: TestClient, mock_bridge: MagicMock
     ) -> None:
         """bytes=5- means from byte 5 to end."""
-        test_data = b"0123456789"
         mock_bridge.head_object.return_value = BucketFile(
             type="file",
             path="data.bin",
@@ -306,7 +305,8 @@ class TestGetObject:
             xet_hash="d" * 64,
             mtime="2026-01-01T00:00:00Z",
         )
-        mock_bridge.get_object_stream.return_value = _async_chunks(test_data)
+        # Bridge returns already-trimmed data for byte_range=(5,9)
+        mock_bridge.get_object_stream.return_value = _async_chunks(b"56789")
         resp = await client.get("/bucket/data.bin", headers={"Range": "bytes=5-"})
         assert resp.status == 206
         body = await resp.read()
@@ -335,7 +335,6 @@ class TestGetObject:
         self, client: TestClient, mock_bridge: MagicMock
     ) -> None:
         """Range request that spans across multiple streamed chunks."""
-        # Data: "AAAAABBBBBCCCCC" (3 chunks of 5 bytes each)
         mock_bridge.head_object.return_value = BucketFile(
             type="file",
             path="chunked.bin",
@@ -343,8 +342,9 @@ class TestGetObject:
             xet_hash="f" * 64,
             mtime="2026-01-01T00:00:00Z",
         )
+        # Bridge returns already-trimmed data for byte_range=(3,11)
         mock_bridge.get_object_stream.return_value = _async_chunks(
-            b"AAAAA", b"BBBBB", b"CCCCC"
+            b"AA", b"BBBBB", b"CC"
         )
         # Request bytes 3-11 → "AABBBBBCC"
         resp = await client.get("/bucket/chunked.bin", headers={"Range": "bytes=3-11"})

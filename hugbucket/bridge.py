@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 import logging
 import mimetypes
@@ -16,7 +17,7 @@ from dataclasses import dataclass, field
 
 from hugbucket.config import Config
 from hugbucket.hub.client import HubClient, BucketInfo, BucketFile, XetConnectionInfo
-from hugbucket.xet.cas_client import CASClient
+from hugbucket.xet.cas_client import CASClient, Reconstruction, ReconstructionTerm
 from hugbucket.xet.chunker import Chunk, chunk_data
 from hugbucket.xet.hasher import (
     chunk_hash,
@@ -28,6 +29,7 @@ from hugbucket.xet.hasher import (
 from hugbucket.xet.xorb import (
     serialize_xorb,
     deserialize_xorb,
+    ChunkEntry,
     XORB_MAX_BYTES,
     XorbChunkOffset,
 )
@@ -200,16 +202,60 @@ def _prepare_upload(data: bytes) -> _PreparedUpload:
 
 
 @dataclass
+class _XorbCacheEntry:
+    """Cached decompressed xorb chunks."""
+
+    chunks: list[ChunkEntry]
+    size: int  # total uncompressed bytes
+
+
+class _XorbCache:
+    """LRU cache for decompressed xorb data, bounded by total memory."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self._cache: OrderedDict[str, _XorbCacheEntry] = OrderedDict()
+        self._total: int = 0
+        self._max: int = max_bytes
+
+    def get(self, key: str) -> list[ChunkEntry] | None:
+        entry = self._cache.get(key)
+        if entry is not None:
+            self._cache.move_to_end(key)
+            return entry.chunks
+        return None
+
+    def put(self, key: str, chunks: list[ChunkEntry]) -> None:
+        if key in self._cache:
+            return
+        size = sum(len(c.uncompressed_data) for c in chunks)
+        if size > self._max:
+            return  # single xorb larger than entire cache
+        while self._total + size > self._max and self._cache:
+            _, evicted = self._cache.popitem(last=False)
+            self._total -= evicted.size
+        self._cache[key] = _XorbCacheEntry(chunks=chunks, size=size)
+        self._total += size
+
+
+@dataclass
 class Bridge:
     """Orchestrates S3 <-> HF Bucket operations."""
 
     config: Config
     hub: HubClient = field(init=False)
     cas: CASClient = field(init=False)
+    _token_cache: dict[str, XetConnectionInfo] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _recon_cache: OrderedDict[str, tuple[float, Reconstruction]] = field(
+        default_factory=OrderedDict, init=False, repr=False
+    )
+    _xorb_cache: _XorbCache = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.hub = HubClient(config=self.config)
         self.cas = CASClient(pool_size=self.config.http_pool_size)
+        self._xorb_cache = _XorbCache(max_bytes=self.config.xorb_cache_max_bytes)
 
     async def close(self) -> None:
         await self.hub.close()
@@ -220,6 +266,51 @@ class Bridge:
         if "/" in bucket_name:
             return bucket_name
         return f"{self.config.hf_namespace}/{bucket_name}"
+
+    # ---- Cached helpers ----
+
+    async def _get_read_token(self, bucket_id: str) -> XetConnectionInfo:
+        """Return a cached read token, refreshing when close to expiry."""
+        cached = self._token_cache.get(bucket_id)
+        if cached and cached.token_expiration > time.time() + 60:
+            return cached
+        conn = await self.hub.get_xet_read_token(bucket_id)
+        self._token_cache[bucket_id] = conn
+        return conn
+
+    async def _get_reconstruction(
+        self, conn: XetConnectionInfo, file_hash: str
+    ) -> Reconstruction:
+        """Return a cached reconstruction plan, fetching if stale/missing."""
+        cached = self._recon_cache.get(file_hash)
+        if cached:
+            ts, recon = cached
+            if time.time() - ts < self.config.recon_cache_ttl:
+                self._recon_cache.move_to_end(file_hash)
+                return recon
+            del self._recon_cache[file_hash]
+        recon = await self.cas.get_reconstruction(conn, file_hash)
+        while len(self._recon_cache) >= self.config.recon_cache_max_entries:
+            self._recon_cache.popitem(last=False)
+        self._recon_cache[file_hash] = (time.time(), recon)
+        return recon
+
+    async def _fetch_xorb_chunks(
+        self, term: ReconstructionTerm, recon: Reconstruction
+    ) -> tuple[list[ChunkEntry], int] | None:
+        """Fetch and decompress xorb chunks, using cache. Returns (chunks, fetch_range_start)."""
+        fetches = recon.fetch_info.get(term.hash, [])
+        for fetch in fetches:
+            if fetch.range_start > term.range_end or fetch.range_end < term.range_start:
+                continue
+            cache_key = f"{term.hash}:{fetch.range_start}:{fetch.range_end}"
+            chunks = self._xorb_cache.get(cache_key)
+            if chunks is None:
+                xorb_bytes = await self.cas.fetch_xorb_range(fetch)
+                chunks = await asyncio.to_thread(deserialize_xorb, xorb_bytes)
+                self._xorb_cache.put(cache_key, chunks)
+            return chunks, fetch.range_start
+        return None
 
     # ---- Bucket operations ----
 
@@ -364,48 +455,33 @@ class Bridge:
             return b""
 
         # Step 2: Get read token
-        conn = await self.hub.get_xet_read_token(bucket_id)
+        conn = await self._get_read_token(bucket_id)
 
         # Step 3: Get reconstruction
-        recon = await self.cas.get_reconstruction(conn, file_info.xet_hash)
+        recon = await self._get_reconstruction(conn, file_info.xet_hash)
 
         # Step 4+5: Fetch and reassemble
         result_parts: list[bytes] = []
         first_term = True
 
         for term in recon.terms:
-            # Find fetch info for this xorb
-            fetches = recon.fetch_info.get(term.hash, [])
+            result = await self._fetch_xorb_chunks(term, recon)
+            if result is None:
+                continue
+            xorb_chunks, fetch_range_start = result
 
-            for fetch in fetches:
-                # Check if this fetch covers our term's chunk range
-                if (
-                    fetch.range_start > term.range_end
-                    or fetch.range_end < term.range_start
-                ):
-                    continue
+            for ci in range(term.range_start, term.range_end):
+                local_idx = ci - fetch_range_start
+                if 0 <= local_idx < len(xorb_chunks):
+                    chunk_bytes = xorb_chunks[local_idx].uncompressed_data
 
-                # Fetch xorb bytes
-                xorb_bytes = await self.cas.fetch_xorb_range(fetch)
+                    if first_term and recon.offset_into_first_range > 0:
+                        chunk_bytes = chunk_bytes[recon.offset_into_first_range :]
+                        first_term = False
+                    else:
+                        first_term = False
 
-                # Deserialize xorb
-                xorb_chunks = deserialize_xorb(xorb_bytes)
-
-                # Extract chunks for this term
-                for ci in range(term.range_start, term.range_end):
-                    local_idx = ci - fetch.range_start
-                    if 0 <= local_idx < len(xorb_chunks):
-                        chunk_bytes = xorb_chunks[local_idx].uncompressed_data
-
-                        # Handle offset for first term
-                        if first_term and recon.offset_into_first_range > 0:
-                            chunk_bytes = chunk_bytes[recon.offset_into_first_range :]
-                            first_term = False
-                        else:
-                            first_term = False
-
-                        result_parts.append(chunk_bytes)
-                break  # Only need one fetch per term
+                    result_parts.append(chunk_bytes)
 
         return b"".join(result_parts)
 
@@ -414,13 +490,19 @@ class Bridge:
         bucket: str,
         key: str,
         file_info: BucketFile | None = None,
+        byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[bytes] | None:
         """Stream an object chunk by chunk instead of buffering the entire file.
 
         Returns an async iterator that yields decompressed chunks, or None
         if the object does not exist.  When *file_info* is supplied the
-        initial ``get_paths_info`` round-trip is skipped (the caller
-        typically already has it from ``head_object``).
+        initial ``get_paths_info`` round-trip is skipped.
+
+        When *byte_range* ``(start, end)`` is given (inclusive on both
+        ends), only the bytes in that window are yielded — terms whose
+        data falls entirely outside the range are never fetched from
+        the CDN, making random-access seeks O(relevant terms) instead
+        of O(all terms).
         """
         bucket_id = self._bucket_id(bucket)
 
@@ -437,38 +519,74 @@ class Bridge:
 
             return _empty()
 
-        conn = await self.hub.get_xet_read_token(bucket_id)
-        recon = await self.cas.get_reconstruction(conn, file_info.xet_hash)
+        conn = await self._get_read_token(bucket_id)
+        recon = await self._get_reconstruction(conn, file_info.xet_hash)
+
+        # Pre-compute cumulative byte boundaries per term so we can
+        # skip terms that fall outside the requested byte_range.
+        term_bounds: list[tuple[int, int]] = []  # (start_byte, end_byte) inclusive
+        cum = 0
+        for i, term in enumerate(recon.terms):
+            usable = term.unpacked_length
+            if i == 0 and recon.offset_into_first_range > 0:
+                usable -= recon.offset_into_first_range
+            term_bounds.append((cum, cum + usable - 1))
+            cum += usable
 
         async def _stream() -> AsyncIterator[bytes]:
-            first_term = True
-            for term in recon.terms:
-                fetches = recon.fetch_info.get(term.hash, [])
-                for fetch in fetches:
-                    if (
-                        fetch.range_start > term.range_end
-                        or fetch.range_end < term.range_start
-                    ):
+            for i, term in enumerate(recon.terms):
+                t_start, t_end = term_bounds[i]
+
+                # ── range-aware term skipping ──
+                if byte_range is not None:
+                    req_start, req_end = byte_range
+                    if t_end < req_start:
+                        continue  # entire term before range
+                    if t_start > req_end:
+                        break  # past the range — done
+
+                result = await self._fetch_xorb_chunks(term, recon)
+                if result is None:
+                    continue
+                xorb_chunks, fetch_range_start = result
+
+                # Track byte position within the file for each chunk
+                chunk_file_pos = t_start
+
+                for ci in range(term.range_start, term.range_end):
+                    local_idx = ci - fetch_range_start
+                    if not (0 <= local_idx < len(xorb_chunks)):
                         continue
 
-                    xorb_bytes = await self.cas.fetch_xorb_range(fetch)
-                    xorb_chunks = deserialize_xorb(xorb_bytes)
+                    chunk_bytes = xorb_chunks[local_idx].uncompressed_data
 
-                    for ci in range(term.range_start, term.range_end):
-                        local_idx = ci - fetch.range_start
-                        if 0 <= local_idx < len(xorb_chunks):
-                            chunk_bytes = xorb_chunks[local_idx].uncompressed_data
+                    # Trim leading offset for the very first chunk of the file
+                    if (
+                        i == 0
+                        and ci == term.range_start
+                        and recon.offset_into_first_range > 0
+                    ):
+                        chunk_bytes = chunk_bytes[recon.offset_into_first_range :]
 
-                            if first_term and recon.offset_into_first_range > 0:
-                                chunk_bytes = chunk_bytes[
-                                    recon.offset_into_first_range :
-                                ]
-                                first_term = False
-                            else:
-                                first_term = False
+                    chunk_start = chunk_file_pos
+                    chunk_end = chunk_file_pos + len(chunk_bytes) - 1
+                    chunk_file_pos += len(chunk_bytes)
 
-                            yield chunk_bytes
-                    break  # Only need one fetch per term
+                    if byte_range is not None:
+                        req_start, req_end = byte_range
+                        # Skip chunks before the range
+                        if chunk_end < req_start:
+                            continue
+                        # Stop after the range
+                        if chunk_start > req_end:
+                            return
+                        # Trim first/last chunk to the exact byte window
+                        left = max(0, req_start - chunk_start)
+                        right = min(len(chunk_bytes), req_end - chunk_start + 1)
+                        chunk_bytes = chunk_bytes[left:right]
+
+                    if chunk_bytes:
+                        yield chunk_bytes
 
         return _stream()
 

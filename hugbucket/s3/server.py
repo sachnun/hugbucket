@@ -382,17 +382,6 @@ class S3Handler:
                     resource=f"/{bucket}/{key}",
                 )
 
-            stream = await self.bridge.get_object_stream(
-                bucket, key, file_info=file_info
-            )
-            if stream is None:
-                return _s3_error(
-                    404,
-                    "NoSuchKey",
-                    "The specified key does not exist.",
-                    resource=f"/{bucket}/{key}",
-                )
-
             etag = (
                 f'"{file_info.xet_hash[:32]}"'
                 if file_info.xet_hash
@@ -404,7 +393,8 @@ class S3Handler:
             )
             total_size = file_info.size
 
-            # Handle Range requests
+            # Parse Range header
+            byte_range: tuple[int, int] | None = None
             range_header = request.headers.get("Range", "")
             if range_header and range_header.startswith("bytes="):
                 range_spec = range_header[6:]  # strip "bytes="
@@ -420,7 +410,23 @@ class S3Handler:
                             "Content-Range": f"bytes */{total_size}",
                         },
                     )
+                byte_range = (start, end)
 
+            # Get the stream — bridge skips irrelevant xorbs when
+            # byte_range is set and trims to the exact byte window.
+            stream = await self.bridge.get_object_stream(
+                bucket, key, file_info=file_info, byte_range=byte_range
+            )
+            if stream is None:
+                return _s3_error(
+                    404,
+                    "NoSuchKey",
+                    "The specified key does not exist.",
+                    resource=f"/{bucket}/{key}",
+                )
+
+            if byte_range is not None:
+                start, end = byte_range
                 slice_length = end - start + 1
                 response = web.StreamResponse(
                     status=206,
@@ -432,46 +438,17 @@ class S3Handler:
                         "Last-Modified": last_modified,
                     },
                 )
-                response.content_type = content_type
-                await response.prepare(request)
+            else:
+                response = web.StreamResponse(
+                    status=200,
+                    headers={
+                        "ETag": etag,
+                        "Content-Length": str(total_size),
+                        "Accept-Ranges": "bytes",
+                        "Last-Modified": last_modified,
+                    },
+                )
 
-                offset = 0
-                bytes_written = 0
-                async for chunk in stream:
-                    chunk_end = offset + len(chunk) - 1
-
-                    # Skip chunks entirely before range
-                    if chunk_end < start:
-                        offset += len(chunk)
-                        continue
-                    # Stop if we've passed the range
-                    if offset > end:
-                        break
-
-                    # Slice the portion of this chunk within [start, end]
-                    slice_start = max(0, start - offset)
-                    slice_end = min(len(chunk), end - offset + 1)
-
-                    await response.write(chunk[slice_start:slice_end])
-                    bytes_written += slice_end - slice_start
-                    offset += len(chunk)
-
-                    if bytes_written >= slice_length:
-                        break
-
-                await response.write_eof()
-                return response
-
-            # Full download — stream chunk by chunk
-            response = web.StreamResponse(
-                status=200,
-                headers={
-                    "ETag": etag,
-                    "Content-Length": str(total_size),
-                    "Accept-Ranges": "bytes",
-                    "Last-Modified": last_modified,
-                },
-            )
             response.content_type = content_type
             await response.prepare(request)
 
@@ -569,7 +546,7 @@ class S3Handler:
                 )
 
             data = await request.read()
-            etag = f'"{hashlib.md5(data).hexdigest()}"'
+            etag = await asyncio.to_thread(lambda: f'"{hashlib.md5(data).hexdigest()}"')
             self._multipart_uploads[upload_id]["parts"][part_number] = data
 
             logger.info(
