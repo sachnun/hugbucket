@@ -421,7 +421,9 @@ class TestMultipartUpload:
         body = await resp.text()
         root = fromstring(body)
         ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
-        upload_id = root.find("s3:UploadId", ns).text
+        upload_id_el = root.find("s3:UploadId", ns)
+        assert upload_id_el is not None
+        upload_id = upload_id_el.text
         assert upload_id
 
         # Upload parts
@@ -475,7 +477,9 @@ class TestMultipartUpload:
         body = await resp.text()
         root = fromstring(body)
         ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
-        upload_id = root.find("s3:UploadId", ns).text
+        upload_id_el = root.find("s3:UploadId", ns)
+        assert upload_id_el is not None
+        upload_id = upload_id_el.text
 
         # Abort
         resp = await client.delete(f"/bucket/file.bin?uploadId={upload_id}")

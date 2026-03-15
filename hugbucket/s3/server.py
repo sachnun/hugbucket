@@ -98,7 +98,9 @@ class S3Handler:
         # Bucket + object operations — catch-all
         app.router.add_route("*", "/{path:.*}", self.handle_request)
 
-    async def handle_request(self, request: web.Request) -> web.Response:
+    async def handle_request(
+        self, request: web.Request
+    ) -> web.Response | web.StreamResponse:
         """Main router: dispatch based on method + path."""
         bucket, key = _parse_bucket_key(request)
 
@@ -484,7 +486,7 @@ class S3Handler:
 
             await response.write_eof()
             return response
-        except (ConnectionResetError, ConnectionError):
+        except ConnectionResetError, ConnectionError:
             logger.debug("GetObject: client disconnected for /%s/%s", bucket, key)
             return web.Response(status=499)  # nginx-style "client closed request"
         except Exception as e:
