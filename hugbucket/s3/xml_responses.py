@@ -136,6 +136,18 @@ def error_xml(
     return to_xml_bytes(root)
 
 
+def get_bucket_location_xml(location: str = "us-east-1") -> bytes:
+    """Build GetBucketLocationResult XML.
+
+    Returns the region/location constraint for a bucket.  S3 clients
+    (e.g. S3 Browser) call ``GET /{bucket}?location`` to discover the
+    region before constructing presigned URLs.
+    """
+    root = _make_root("LocationConstraint")
+    root.text = location
+    return to_xml_bytes(root)
+
+
 def delete_result_xml(deleted: list[str], errors: list[dict] | None = None) -> bytes:
     """Build DeleteResult XML for multi-object delete."""
     root = _make_root("DeleteResult")

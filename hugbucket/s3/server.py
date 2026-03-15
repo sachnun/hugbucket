@@ -26,6 +26,7 @@ from hugbucket.s3.xml_responses import (
     error_xml,
     delete_result_xml,
     copy_object_result_xml,
+    get_bucket_location_xml,
     initiate_multipart_upload_xml,
     complete_multipart_upload_xml,
 )
@@ -116,6 +117,12 @@ class S3Handler:
         # Bucket-level operations (no key)
         if not key:
             query = request.query
+
+            # GetBucketLocation: GET /{bucket}?location
+            # S3 clients (e.g. S3 Browser) call this to discover the
+            # bucket region before constructing presigned URLs.
+            if "location" in query:
+                return await self.handle_get_bucket_location(request, bucket)
 
             # ListObjectsV2
             if "list-type" in query:
@@ -213,6 +220,26 @@ class S3Handler:
             return web.Response(status=200)
         except Exception as e:
             logger.exception("HeadBucket failed")
+            return _s3_error(500, "InternalError", str(e))
+
+    async def handle_get_bucket_location(
+        self, request: web.Request, bucket: str
+    ) -> web.Response:
+        """Handle GetBucketLocation (GET /{bucket}?location).
+
+        S3 clients (e.g. S3 Browser, boto3) call this to discover the
+        bucket region before constructing presigned URLs.  Without a
+        proper response, clients may parse a ListObjectsV2 response
+        instead and produce corrupted presigned URL credentials.
+        """
+        try:
+            info = await self.bridge.head_bucket(bucket)
+            if info is None:
+                return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
+            body = get_bucket_location_xml("us-east-1")
+            return web.Response(status=200, content_type=XML_CONTENT, body=body)
+        except Exception as e:
+            logger.exception("GetBucketLocation failed")
             return _s3_error(500, "InternalError", str(e))
 
     async def handle_delete_objects(
