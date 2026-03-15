@@ -251,6 +251,9 @@ class Bridge:
         default_factory=OrderedDict, init=False, repr=False
     )
     _xorb_cache: _XorbCache = field(init=False, repr=False)
+    _file_info_cache: OrderedDict[str, tuple[float, BucketFile]] = field(
+        default_factory=OrderedDict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.hub = HubClient(config=self.config)
@@ -294,6 +297,32 @@ class Bridge:
             self._recon_cache.popitem(last=False)
         self._recon_cache[file_hash] = (time.time(), recon)
         return recon
+
+    async def _get_file_info_cached(
+        self, bucket_id: str, key: str
+    ) -> BucketFile | None:
+        """Return cached file metadata, fetching from Hub if stale/missing."""
+        cache_key = f"{bucket_id}:{key}"
+        cached = self._file_info_cache.get(cache_key)
+        if cached is not None:
+            ts, file_info = cached
+            if time.time() - ts < self.config.file_info_cache_ttl:
+                self._file_info_cache.move_to_end(cache_key)
+                return file_info
+            del self._file_info_cache[cache_key]
+        files = await self.hub.get_paths_info(bucket_id, [key])
+        if not files:
+            return None
+        file_info = files[0]
+        while len(self._file_info_cache) >= self.config.file_info_cache_max_entries:
+            self._file_info_cache.popitem(last=False)
+        self._file_info_cache[cache_key] = (time.time(), file_info)
+        return file_info
+
+    def _invalidate_file_info(self, bucket_id: str, key: str) -> None:
+        """Remove a file_info entry from the cache after a mutation."""
+        cache_key = f"{bucket_id}:{key}"
+        self._file_info_cache.pop(cache_key, None)
 
     async def _fetch_xorb_chunks(
         self, term: ReconstructionTerm, recon: Reconstruction
@@ -629,10 +658,9 @@ class Bridge:
         return deleted, errors
 
     async def head_object(self, bucket: str, key: str) -> BucketFile | None:
-        """Get object metadata."""
+        """Get object metadata (cached)."""
         bucket_id = self._bucket_id(bucket)
-        files = await self.hub.get_paths_info(bucket_id, [key])
-        return files[0] if files else None
+        return await self._get_file_info_cached(bucket_id, key)
 
     async def copy_object(
         self,
@@ -652,11 +680,10 @@ class Bridge:
         src_bucket_id = self._bucket_id(src_bucket)
         dst_bucket_id = self._bucket_id(dst_bucket)
 
-        # Get source file metadata
-        files = await self.hub.get_paths_info(src_bucket_id, [src_key])
-        if not files:
+        # Get source file metadata (using cache)
+        src_file = await self._get_file_info_cached(src_bucket_id, src_key)
+        if not src_file:
             raise FileNotFoundError(f"Source object not found: {src_bucket}/{src_key}")
-        src_file = files[0]
 
         # Register the new path with the same content hash
         content_type = mimetypes.guess_type(dst_key)[0] or "application/octet-stream"

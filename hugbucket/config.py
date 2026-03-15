@@ -44,3 +44,5 @@ class Config:
     xorb_cache_max_bytes: int = 512 * 1024 * 1024  # 512 MiB
     recon_cache_max_entries: int = 1024
     recon_cache_ttl: int = 300  # 5 minutes
+    file_info_cache_max_entries: int = 256
+    file_info_cache_ttl: int = 30  # 30 seconds — short enough for consistency
