@@ -434,6 +434,7 @@ class Bridge:
             ],
         )
 
+        self._invalidate_file_info(bucket_id, key)
         return {"ETag": f'"{prepared.etag}"', "size": len(data)}
 
     async def _put_empty_file(self, bucket_id: str, key: str) -> dict:
@@ -457,6 +458,7 @@ class Bridge:
                 }
             ],
         )
+        self._invalidate_file_info(bucket_id, key)
         etag = hashlib.md5(b"").hexdigest()
         return {"ETag": f'"{etag}"', "size": 0}
 
@@ -627,6 +629,7 @@ class Bridge:
         if key.endswith("/"):
             keys_to_delete.append(key + DIR_MARKER_FILENAME)
         await self.hub.batch_files(bucket_id, delete=keys_to_delete)
+        self._invalidate_file_info(bucket_id, key)
 
     async def delete_objects(
         self, bucket: str, keys: list[str]
@@ -647,6 +650,8 @@ class Bridge:
         try:
             await self.hub.batch_files(bucket_id, delete=all_keys)
             deleted = list(keys)  # report original keys only
+            for key in keys:
+                self._invalidate_file_info(bucket_id, key)
         except Exception as exc:
             logger.exception("delete_objects batch failed")
             # Report every key as failed so the caller can build a proper
@@ -701,6 +706,7 @@ class Bridge:
             ],
         )
 
+        self._invalidate_file_info(dst_bucket_id, dst_key)
         etag = f'"{src_file.xet_hash[:32]}"'
         last_modified = src_file.mtime or src_file.uploaded_at or ""
         logger.info(f"COPY {src_bucket}/{src_key} -> {dst_bucket}/{dst_key}")
