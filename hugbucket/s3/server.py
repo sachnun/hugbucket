@@ -509,6 +509,23 @@ class S3Handler:
         try:
             file_info = await self.bridge.head_object(bucket, key)
             if file_info is None:
+                # Directory HEAD: S3 clients (e.g. S3 Browser) send HEAD on
+                # folder keys (trailing slash) to check if a folder exists.
+                # In real AWS S3 the console stores a 0-byte object for
+                # folders; HugBucket uses a hidden .hugbucket_keep marker
+                # instead, so we check for it here.
+                if key.endswith("/"):
+                    exists = await self.bridge.head_directory(bucket, key)
+                    if exists:
+                        return web.Response(
+                            status=200,
+                            headers={
+                                "Content-Length": "0",
+                                "Content-Type": "application/x-directory",
+                                "Last-Modified": _format_last_modified(None),
+                            },
+                        )
+
                 return _s3_error(
                     404,
                     "NoSuchKey",

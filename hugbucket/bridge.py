@@ -667,6 +667,33 @@ class Bridge:
         bucket_id = self._bucket_id(bucket)
         return await self._get_file_info_cached(bucket_id, key)
 
+    async def head_directory(self, bucket: str, prefix: str) -> bool:
+        """Check if a directory prefix exists.
+
+        A directory is considered to exist if:
+        1. A .hugbucket_keep marker file exists (explicitly created folder), OR
+        2. Any objects exist under the prefix (implicit folder).
+
+        This supports S3 clients (e.g. S3 Browser) that send HEAD requests
+        on folder keys (trailing slash) to verify folder existence.  In real
+        AWS S3 the console creates a 0-byte object for folders; HugBucket
+        stores a hidden marker instead, so we need this fallback.
+        """
+        bucket_id = self._bucket_id(bucket)
+
+        # Fast path: check for the explicit directory marker
+        marker = await self._get_file_info_cached(
+            bucket_id, prefix + DIR_MARKER_FILENAME
+        )
+        if marker is not None:
+            return True
+
+        # Slow path: check if any objects exist under this prefix
+        all_files = await self.hub.list_bucket_tree(
+            bucket_id, prefix=prefix, recursive=True
+        )
+        return len(all_files) > 0
+
     async def copy_object(
         self,
         src_bucket: str,

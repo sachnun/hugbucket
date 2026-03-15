@@ -39,6 +39,7 @@ def mock_bridge() -> MagicMock:
     bridge.delete_object = AsyncMock()
     bridge.delete_objects = AsyncMock(return_value=([], []))
     bridge.head_object = AsyncMock(return_value=None)
+    bridge.head_directory = AsyncMock(return_value=False)
     bridge.copy_object = AsyncMock(
         return_value={"ETag": '"abc123"', "LastModified": "2026-01-01T00:00:00Z"}
     )
@@ -375,6 +376,47 @@ class TestHeadObject:
         mock_bridge.head_object.return_value = None
         resp = await client.head("/bucket/missing.txt")
         assert resp.status == 404
+
+    async def test_head_directory_with_marker(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """HEAD on a folder key should return 200 when .hugbucket_keep marker exists."""
+        mock_bridge.head_object.return_value = None
+        mock_bridge.head_directory.return_value = True
+        resp = await client.head("/bucket/avatars/")
+        assert resp.status == 200
+        assert resp.headers["Content-Length"] == "0"
+        assert resp.headers["Content-Type"] == "application/x-directory"
+        mock_bridge.head_directory.assert_awaited_once_with("bucket", "avatars/")
+
+    async def test_head_directory_with_files(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """HEAD on a folder key should return 200 when objects exist under prefix."""
+        mock_bridge.head_object.return_value = None
+        mock_bridge.head_directory.return_value = True
+        resp = await client.head("/bucket/photos/vacation/")
+        assert resp.status == 200
+        assert resp.headers["Content-Length"] == "0"
+        assert resp.headers["Content-Type"] == "application/x-directory"
+
+    async def test_head_directory_not_found(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """HEAD on a non-existent folder should return 404."""
+        mock_bridge.head_object.return_value = None
+        mock_bridge.head_directory.return_value = False
+        resp = await client.head("/bucket/nonexistent/")
+        assert resp.status == 404
+
+    async def test_head_non_directory_key_no_fallback(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """HEAD on a non-directory key (no trailing slash) should NOT try directory check."""
+        mock_bridge.head_object.return_value = None
+        resp = await client.head("/bucket/missing.txt")
+        assert resp.status == 404
+        mock_bridge.head_directory.assert_not_awaited()
 
 
 class TestListObjectsV2:
