@@ -301,7 +301,7 @@ def _verify_query_auth(request: web.Request, config: Config) -> AuthError | None
                     "ServerTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 },
             )
-    except ValueError, OverflowError:
+    except (ValueError, OverflowError):
         return AuthError(403, "AccessDenied", "Access Denied")
 
     # ── canonical request ────────────────────────────────────────────
@@ -453,7 +453,7 @@ def _verify_v2_query_auth(request: web.Request, config: Config) -> AuthError | N
                 "Request has expired",
                 {"Expires": expires},
             )
-    except ValueError, OverflowError:
+    except (ValueError, OverflowError):
         return AuthError(403, "AccessDenied", "Access Denied")
 
     # ── string to sign ───────────────────────────────────────────────
