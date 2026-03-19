@@ -13,6 +13,8 @@ docker run -d \
   -p 9000:9000 \
   -e MODE=s3 \
   -e HF_TOKEN=hf_xxxxx \
+  -e AWS_ACCESS_KEY_ID=hugbucket \
+  -e AWS_SECRET_ACCESS_KEY=hugbucket \
   ghcr.io/sachnun/hugbucket
 ```
 
@@ -24,6 +26,8 @@ docker run -d \
   -p 30000-30099:30000-30099 \
   -e MODE=ftp \
   -e HF_TOKEN=hf_xxxxx \
+  -e FTP_USERNAME=hugbucket \
+  -e FTP_PASSWORD=hugbucket \
   ghcr.io/sachnun/hugbucket
 ```
 
@@ -48,15 +52,14 @@ Path mapping for FTP is `/<bucket>/<key>`.
 
 ## Environment Variables
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `MODE`<sup>*</sup> | - | Run mode (`s3` or `ftp`) |
-| `HF_TOKEN`<sup>*</sup> | - | Hugging Face token |
-| `AWS_ACCESS_KEY_ID` | - | S3 access key |
-| `AWS_SECRET_ACCESS_KEY` | - | S3 secret key |
-| `FTP_USERNAME` | - | FTP username |
-| `FTP_PASSWORD` | - | FTP password |
-| `FTP_BANNER` | `HugBucket FTP ready` | FTP banner |
+| Variable | Description |
+| --- | --- |
+| `MODE`<sup>*</sup> | Run mode (`s3` or `ftp`) |
+| `HF_TOKEN`<sup>*</sup> | Hugging Face token |
+| `AWS_ACCESS_KEY_ID` | S3 access key |
+| `AWS_SECRET_ACCESS_KEY` | S3 secret key |
+| `FTP_USERNAME` | FTP username |
+| `FTP_PASSWORD` | FTP password |
 
 ## Development
 
