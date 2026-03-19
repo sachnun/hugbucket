@@ -6,7 +6,7 @@ Multi-protocol gateway for Hugging Face Storage Buckets.
 
 You'll need [Docker](https://docs.docker.com/get-docker/) to get started.
 
-### S3 mode
+#### S3
 
 ```bash
 docker run -d \
@@ -18,7 +18,7 @@ docker run -d \
   ghcr.io/sachnun/hugbucket
 ```
 
-### FTP mode
+#### FTP
 
 ```bash
 docker run -d \
@@ -33,14 +33,14 @@ docker run -d \
 
 ## Usage
 
-### S3 (AWS CLI)
+#### S3 ([AWS CLI](https://aws.amazon.com/cli/))
 
 ```bash
 aws --endpoint-url http://localhost:9000 s3 ls
 aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://my-bucket/file.txt
 ```
 
-### FTP (any FTP client)
+#### FTP
 
 ```bash
 ftp localhost 2121
@@ -54,7 +54,7 @@ Path mapping for FTP is `/<bucket>/<key>`.
 
 Required:
 
-- `MODE`: `s3` or `ftp`
+- `MODE`
 - `HF_TOKEN`
 
 Optional:
@@ -73,7 +73,6 @@ This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
 ```bash
 uv sync
 
-# Top-level entrypoint (uses MODE)
 MODE=s3 HF_TOKEN=hf_xxxxx uv run hugbucket
 
 # Explicit protocol entrypoints
