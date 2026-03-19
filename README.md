@@ -50,17 +50,17 @@ Path mapping for FTP is `/<bucket>/<key>`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MODE`<sup>*</sup> | - | Protocol selector: `s3` or `ftp` |
-| `HF_TOKEN`<sup>*</sup> | - | Hugging Face access token |
-| `AWS_ACCESS_KEY_ID` | empty | S3 access key used by clients; leave empty to disable S3 auth |
-| `AWS_SECRET_ACCESS_KEY` | empty | S3 secret key used by clients; leave empty to disable S3 auth |
-| `FTP_HOST` | `0.0.0.0` | FTP bind host |
-| `FTP_PORT` | `2121` | FTP bind port |
-| `FTP_USERNAME` | empty | FTP login username; leave empty with `FTP_PASSWORD` for anonymous FTP |
-| `FTP_PASSWORD` | empty | FTP login password; leave empty with `FTP_USERNAME` for anonymous FTP |
-| `FTP_BANNER` | `HugBucket FTP ready` | FTP server welcome banner |
-| `FTP_PASSIVE_MIN_PORT` | `30000` | FTP passive mode range start |
-| `FTP_PASSIVE_MAX_PORT` | `30099` | FTP passive mode range end |
+| `MODE`<sup>*</sup> | - | Run mode (`s3` or `ftp`) |
+| `HF_TOKEN`<sup>*</sup> | - | Hugging Face token |
+| `AWS_ACCESS_KEY_ID` | - | S3 access key |
+| `AWS_SECRET_ACCESS_KEY` | - | S3 secret key |
+| `FTP_HOST` | `0.0.0.0` | FTP host |
+| `FTP_PORT` | `2121` | FTP port |
+| `FTP_USERNAME` | - | FTP username |
+| `FTP_PASSWORD` | - | FTP password |
+| `FTP_BANNER` | `HugBucket FTP ready` | FTP banner |
+| `FTP_PASSIVE_MIN_PORT` | `30000` | FTP passive min port |
+| `FTP_PASSIVE_MAX_PORT` | `30099` | FTP passive max port |
 
 ## Development
 
