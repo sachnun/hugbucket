@@ -64,7 +64,7 @@ class TestDirectoryMarkers:
         self._setup_xet_mocks(mock_hub, mock_cas)
         result = await bridge.put_object("mybucket", "New Folder/", b"")
         assert "ETag" in result
-        assert result["size"] > 0  # tiny placeholder content
+        assert result["size"] == 0
 
     async def test_folder_marker_stores_placeholder(
         self, bridge, mock_hub: MagicMock, mock_cas: MagicMock
@@ -93,7 +93,7 @@ class TestDirectoryMarkers:
     ) -> None:
         self._setup_xet_mocks(mock_hub, mock_cas)
         result = await bridge.put_object("mybucket", "a/b/c/d/", b"")
-        assert result["size"] > 0
+        assert result["size"] == 0
         mock_hub.batch_files.assert_awaited_once()
         call_args = mock_hub.batch_files.call_args
         add_list = call_args.kwargs.get("add") or call_args[1].get("add")
