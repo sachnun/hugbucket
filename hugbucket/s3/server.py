@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import logging
 import mimetypes
+import time
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import unquote
@@ -86,10 +87,24 @@ def _parse_bucket_key(request: web.Request) -> tuple[str, str]:
 class S3Handler:
     """Handles S3 API requests."""
 
-    def __init__(self, bridge: StorageBackend) -> None:
+    # Multipart upload statuses
+    _MP_COLLECTING = "collecting"  # accepting parts
+    _MP_COMPLETING = "completing"  # bridge.put_object in progress
+    _MP_COMPLETED = "completed"  # upload finished successfully
+    _MP_FAILED = "failed"  # upload failed, can be retried
+
+    def __init__(
+        self,
+        bridge: StorageBackend,
+        multipart_upload_ttl: int = 86400,
+    ) -> None:
         self.bridge = bridge
-        # In-memory multipart upload state: upload_id -> {bucket, key, parts: {part_num: bytes}}
+        self._multipart_upload_ttl = multipart_upload_ttl
+        # In-memory multipart upload state:
+        # upload_id -> {bucket, key, parts: {part_num: bytes},
+        #               status, created_at, event, result_body, result_etag}
         self._multipart_uploads: dict[str, dict] = {}
+        self._cleanup_task: asyncio.Task | None = None
 
     def setup_routes(self, app: web.Application) -> None:
         # Service-level
@@ -97,6 +112,41 @@ class S3Handler:
 
         # Bucket + object operations — catch-all
         app.router.add_route("*", "/{path:.*}", self.handle_request)
+
+        # Lifecycle hooks for multipart upload cleanup
+        app.on_startup.append(self._start_cleanup)
+        app.on_shutdown.append(self._stop_cleanup)
+
+    async def _start_cleanup(self, app: web.Application) -> None:
+        """Start background task that purges stale multipart uploads."""
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+    async def _stop_cleanup(self, app: web.Application) -> None:
+        """Cancel the cleanup background task on shutdown."""
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _cleanup_loop(self) -> None:
+        """Periodically remove stale multipart uploads to prevent memory leaks."""
+        while True:
+            await asyncio.sleep(600)  # run every 10 minutes
+            try:
+                now = time.monotonic()
+                stale = [
+                    uid
+                    for uid, info in self._multipart_uploads.items()
+                    if (now - info["created_at"]) > self._multipart_upload_ttl
+                    and info["status"] != self._MP_COMPLETING
+                ]
+                for uid in stale:
+                    logger.info(f"Cleaning up stale multipart upload: {uid}")
+                    del self._multipart_uploads[uid]
+            except Exception:
+                logger.exception("Error in multipart cleanup loop")
 
     async def handle_request(
         self, request: web.Request
@@ -565,6 +615,11 @@ class S3Handler:
                 "bucket": bucket,
                 "key": key,
                 "parts": {},
+                "status": self._MP_COLLECTING,
+                "created_at": time.monotonic(),
+                "event": None,
+                "result_body": None,
+                "result_etag": None,
             }
             logger.info(
                 f"InitiateMultipartUpload: bucket={bucket} key={key} uploadId={upload_id}"
@@ -583,7 +638,8 @@ class S3Handler:
             upload_id = request.query["uploadId"]
             part_number = int(request.query["partNumber"])
 
-            if upload_id not in self._multipart_uploads:
+            upload = self._multipart_uploads.get(upload_id)
+            if upload is None:
                 return _s3_error(
                     404,
                     "NoSuchUpload",
@@ -591,9 +647,17 @@ class S3Handler:
                     resource=f"/{bucket}/{key}",
                 )
 
+            if upload["status"] != self._MP_COLLECTING:
+                return _s3_error(
+                    409,
+                    "InvalidRequest",
+                    "Upload is no longer accepting parts.",
+                    resource=f"/{bucket}/{key}",
+                )
+
             data = await request.read()
             etag = await asyncio.to_thread(lambda: f'"{hashlib.md5(data).hexdigest()}"')
-            self._multipart_uploads[upload_id]["parts"][part_number] = data
+            upload["parts"][part_number] = data
 
             logger.info(
                 f"UploadPart: uploadId={upload_id} part={part_number} "
@@ -610,11 +674,19 @@ class S3Handler:
     async def handle_complete_multipart(
         self, request: web.Request, bucket: str, key: str
     ) -> web.Response:
-        """Complete a multipart upload: concatenate parts and upload as one object."""
+        """Complete a multipart upload: concatenate parts and upload as one object.
+
+        This method is idempotent: if the client retries after a timeout
+        while the upload is still in progress, it waits for the result.
+        If the upload already completed, it returns the cached response.
+        If the upload previously failed, it resets state so the client
+        can re-upload parts and retry.
+        """
         try:
             upload_id = request.query["uploadId"]
 
-            if upload_id not in self._multipart_uploads:
+            upload = self._multipart_uploads.get(upload_id)
+            if upload is None:
                 return _s3_error(
                     404,
                     "NoSuchUpload",
@@ -622,9 +694,58 @@ class S3Handler:
                     resource=f"/{bucket}/{key}",
                 )
 
-            upload = self._multipart_uploads.pop(upload_id)
-            parts = upload["parts"]
+            status = upload["status"]
 
+            # Already completed — return cached result (idempotent retry)
+            if status == self._MP_COMPLETED:
+                logger.info(
+                    f"CompleteMultipartUpload: uploadId={upload_id} "
+                    f"returning cached result"
+                )
+                return web.Response(
+                    status=200,
+                    content_type=XML_CONTENT,
+                    body=upload["result_body"],
+                )
+
+            # Currently being completed by another request — wait for it
+            if status == self._MP_COMPLETING:
+                event = upload.get("event")
+                if event is not None:
+                    logger.info(
+                        f"CompleteMultipartUpload: uploadId={upload_id} "
+                        f"waiting for in-progress completion"
+                    )
+                    await event.wait()
+
+                    # Re-check status after waiting
+                    if upload["status"] == self._MP_COMPLETED:
+                        return web.Response(
+                            status=200,
+                            content_type=XML_CONTENT,
+                            body=upload["result_body"],
+                        )
+                    # If it failed, fall through to the failed handler below
+                    status = upload["status"]
+
+            # Previously failed — reset so client can retry
+            if status == self._MP_FAILED:
+                logger.info(
+                    f"CompleteMultipartUpload: uploadId={upload_id} "
+                    f"retrying after previous failure"
+                )
+                upload["status"] = self._MP_COLLECTING
+                status = self._MP_COLLECTING
+
+            if status != self._MP_COLLECTING:
+                return _s3_error(
+                    409,
+                    "InvalidRequest",
+                    f"Upload is in unexpected state: {status}",
+                    resource=f"/{bucket}/{key}",
+                )
+
+            parts = upload["parts"]
             if not parts:
                 return _s3_error(
                     400,
@@ -632,24 +753,47 @@ class S3Handler:
                     "You must specify at least one part.",
                 )
 
-            # Concatenate parts in order (offload to thread for large payloads)
-            sorted_part_nums = sorted(parts.keys())
-            data = await asyncio.to_thread(
-                lambda: b"".join(parts[n] for n in sorted_part_nums)
-            )
+            # Transition to completing — prevent concurrent processing
+            upload["status"] = self._MP_COMPLETING
+            event = asyncio.Event()
+            upload["event"] = event
 
-            logger.info(
-                f"CompleteMultipartUpload: uploadId={upload_id} "
-                f"parts={len(parts)} total_size={len(data)}"
-            )
+            try:
+                # Concatenate parts in order, freeing each part as we go
+                # to reduce peak memory from ~2x to ~1x file size.
+                sorted_part_nums = sorted(parts.keys())
+                buf = bytearray()
+                for n in sorted_part_nums:
+                    buf.extend(parts.pop(n))
+                data = bytes(buf)
+                del buf  # free the bytearray
 
-            # Upload as regular object
-            result = await self.bridge.put_object(bucket, key, data)
+                logger.info(
+                    f"CompleteMultipartUpload: uploadId={upload_id} "
+                    f"parts={len(sorted_part_nums)} total_size={len(data)}"
+                )
 
-            etag = result["ETag"]
-            location = f"/{bucket}/{key}"
-            body = complete_multipart_upload_xml(location, bucket, key, etag)
-            return web.Response(status=200, content_type=XML_CONTENT, body=body)
+                # Upload as regular object
+                result = await self.bridge.put_object(bucket, key, data)
+
+                etag = result["ETag"]
+                location = f"/{bucket}/{key}"
+                body = complete_multipart_upload_xml(location, bucket, key, etag)
+
+                # Cache success for idempotent retries
+                upload["status"] = self._MP_COMPLETED
+                upload["result_body"] = body
+                upload["result_etag"] = etag
+                event.set()
+
+                return web.Response(status=200, content_type=XML_CONTENT, body=body)
+
+            except Exception:
+                # Mark as failed so the upload can be retried
+                upload["status"] = self._MP_FAILED
+                upload["event"] = None
+                event.set()
+                raise
 
         except Exception as e:
             logger.exception("CompleteMultipartUpload failed")
@@ -662,11 +806,20 @@ class S3Handler:
         try:
             upload_id = request.query["uploadId"]
 
-            if upload_id not in self._multipart_uploads:
+            upload = self._multipart_uploads.get(upload_id)
+            if upload is None:
                 return _s3_error(
                     404,
                     "NoSuchUpload",
                     "The specified upload does not exist.",
+                    resource=f"/{bucket}/{key}",
+                )
+
+            if upload["status"] == self._MP_COMPLETING:
+                return _s3_error(
+                    409,
+                    "InvalidRequest",
+                    "Cannot abort upload while completion is in progress.",
                     resource=f"/{bucket}/{key}",
                 )
 

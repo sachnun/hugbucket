@@ -6,6 +6,7 @@ focusing on correct S3 protocol behavior.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
@@ -540,6 +541,249 @@ class TestMultipartUpload:
             data=b"<CompleteMultipartUpload/>",
         )
         assert resp.status == 404
+
+    async def test_idempotent_complete_returns_cached_result(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Calling CompleteMultipartUpload twice returns the same cached result."""
+        # Initiate
+        resp = await client.post("/bucket/file.bin?uploads")
+        assert resp.status == 200
+        root = fromstring(await resp.text())
+        ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+        upload_id = root.find("s3:UploadId", ns).text
+
+        # Upload a part
+        resp = await client.put(
+            f"/bucket/file.bin?partNumber=1&uploadId={upload_id}",
+            data=b"payload",
+        )
+        assert resp.status == 200
+
+        # Complete first time
+        mock_bridge.put_object.return_value = {"ETag": '"etag1"', "size": 7}
+        resp1 = await client.post(
+            f"/bucket/file.bin?uploadId={upload_id}",
+            data=b"<CompleteMultipartUpload/>",
+        )
+        assert resp1.status == 200
+        body1 = await resp1.text()
+        assert "CompleteMultipartUploadResult" in body1
+
+        # Complete second time (idempotent retry)
+        resp2 = await client.post(
+            f"/bucket/file.bin?uploadId={upload_id}",
+            data=b"<CompleteMultipartUpload/>",
+        )
+        assert resp2.status == 200
+        body2 = await resp2.text()
+        assert body1 == body2
+
+        # put_object should only have been called once
+        assert mock_bridge.put_object.await_count == 1
+
+    async def test_complete_after_failure_resets_and_retries(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """If CompleteMultipartUpload fails, a retry should re-attempt the upload."""
+        # Initiate
+        resp = await client.post("/bucket/file.bin?uploads")
+        root = fromstring(await resp.text())
+        ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+        upload_id = root.find("s3:UploadId", ns).text
+
+        # Upload a part
+        resp = await client.put(
+            f"/bucket/file.bin?partNumber=1&uploadId={upload_id}",
+            data=b"data",
+        )
+        assert resp.status == 200
+
+        # First complete fails
+        mock_bridge.put_object.side_effect = RuntimeError("CAS error")
+        resp = await client.post(
+            f"/bucket/file.bin?uploadId={upload_id}",
+            data=b"<CompleteMultipartUpload/>",
+        )
+        assert resp.status == 500
+
+        # Re-upload the part (since parts were consumed during concatenation)
+        resp = await client.put(
+            f"/bucket/file.bin?partNumber=1&uploadId={upload_id}",
+            data=b"data",
+        )
+        assert resp.status == 200
+
+        # Retry complete -- should succeed now
+        mock_bridge.put_object.side_effect = None
+        mock_bridge.put_object.return_value = {"ETag": '"ok"', "size": 4}
+        resp = await client.post(
+            f"/bucket/file.bin?uploadId={upload_id}",
+            data=b"<CompleteMultipartUpload/>",
+        )
+        assert resp.status == 200
+        body = await resp.text()
+        assert "CompleteMultipartUploadResult" in body
+
+    async def test_upload_part_rejected_during_completing(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Parts should be rejected when the upload is in completing state."""
+        # Initiate
+        resp = await client.post("/bucket/file.bin?uploads")
+        root = fromstring(await resp.text())
+        ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+        upload_id = root.find("s3:UploadId", ns).text
+
+        # Upload a part
+        resp = await client.put(
+            f"/bucket/file.bin?partNumber=1&uploadId={upload_id}",
+            data=b"data",
+        )
+        assert resp.status == 200
+
+        # Make put_object block so we can test concurrent behavior
+        complete_started = asyncio.Event()
+        proceed = asyncio.Event()
+
+        async def slow_put_object(*args, **kwargs):
+            complete_started.set()
+            await proceed.wait()
+            return {"ETag": '"slow"', "size": 4}
+
+        mock_bridge.put_object.side_effect = slow_put_object
+
+        # Start complete in background
+        complete_task = asyncio.create_task(
+            client.post(
+                f"/bucket/file.bin?uploadId={upload_id}",
+                data=b"<CompleteMultipartUpload/>",
+            )
+        )
+        await complete_started.wait()
+
+        # Try to upload a part while completing -- should be rejected
+        resp = await client.put(
+            f"/bucket/file.bin?partNumber=2&uploadId={upload_id}",
+            data=b"more-data",
+        )
+        assert resp.status == 409
+
+        # Let complete finish
+        proceed.set()
+        resp = await complete_task
+        assert resp.status == 200
+
+    async def test_abort_rejected_during_completing(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Abort should be rejected when the upload is being completed."""
+        # Initiate
+        resp = await client.post("/bucket/file.bin?uploads")
+        root = fromstring(await resp.text())
+        ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+        upload_id = root.find("s3:UploadId", ns).text
+
+        # Upload a part
+        resp = await client.put(
+            f"/bucket/file.bin?partNumber=1&uploadId={upload_id}",
+            data=b"data",
+        )
+        assert resp.status == 200
+
+        # Make put_object block
+        complete_started = asyncio.Event()
+        proceed = asyncio.Event()
+
+        async def slow_put_object(*args, **kwargs):
+            complete_started.set()
+            await proceed.wait()
+            return {"ETag": '"slow"', "size": 4}
+
+        mock_bridge.put_object.side_effect = slow_put_object
+
+        # Start complete in background
+        complete_task = asyncio.create_task(
+            client.post(
+                f"/bucket/file.bin?uploadId={upload_id}",
+                data=b"<CompleteMultipartUpload/>",
+            )
+        )
+        await complete_started.wait()
+
+        # Try abort while completing -- should be rejected
+        resp = await client.delete(f"/bucket/file.bin?uploadId={upload_id}")
+        assert resp.status == 409
+
+        # Let complete finish
+        proceed.set()
+        resp = await complete_task
+        assert resp.status == 200
+
+    async def test_concurrent_complete_waits_for_first(
+        self, client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        """Second CompleteMultipartUpload should wait for the first to finish."""
+        # Initiate
+        resp = await client.post("/bucket/file.bin?uploads")
+        root = fromstring(await resp.text())
+        ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+        upload_id = root.find("s3:UploadId", ns).text
+
+        # Upload a part
+        resp = await client.put(
+            f"/bucket/file.bin?partNumber=1&uploadId={upload_id}",
+            data=b"data",
+        )
+        assert resp.status == 200
+
+        # Make put_object block
+        complete_started = asyncio.Event()
+        proceed = asyncio.Event()
+
+        async def slow_put_object(*args, **kwargs):
+            complete_started.set()
+            await proceed.wait()
+            return {"ETag": '"concurrent"', "size": 4}
+
+        mock_bridge.put_object.side_effect = slow_put_object
+
+        # Start first complete
+        task1 = asyncio.create_task(
+            client.post(
+                f"/bucket/file.bin?uploadId={upload_id}",
+                data=b"<CompleteMultipartUpload/>",
+            )
+        )
+        await complete_started.wait()
+
+        # Start second complete -- should wait for first
+        task2 = asyncio.create_task(
+            client.post(
+                f"/bucket/file.bin?uploadId={upload_id}",
+                data=b"<CompleteMultipartUpload/>",
+            )
+        )
+
+        # Give task2 a moment to reach the event.wait()
+        await asyncio.sleep(0.05)
+        assert not task2.done()
+
+        # Let first complete finish
+        proceed.set()
+
+        resp1 = await task1
+        resp2 = await task2
+
+        assert resp1.status == 200
+        assert resp2.status == 200
+
+        body1 = await resp1.text()
+        body2 = await resp2.text()
+        assert body1 == body2
+
+        # put_object should only have been called once
+        assert mock_bridge.put_object.await_count == 1
 
 
 class TestDeleteObjects:

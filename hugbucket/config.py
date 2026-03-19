@@ -49,6 +49,7 @@ class Config:
     cas_upload_timeout: int = 300  # 5 minutes per CAS request
     cas_upload_retries: int = 3  # retry count for CAS xorb/shard uploads
     cas_retry_base_delay: float = 1.0  # base delay (seconds) for exponential backoff
+    multipart_upload_ttl: int = 86400  # 24 hours before stale multipart cleanup
 
     # Cache settings
     xorb_cache_max_bytes: int = 512 * 1024 * 1024  # 512 MiB

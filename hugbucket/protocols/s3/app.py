@@ -22,7 +22,10 @@ def create_s3_app(
     max_upload_bytes: int = 1024 * 1024 * 1024,
 ) -> web.Application:
     """Create an aiohttp app serving the S3 protocol adapter."""
-    handler = S3Handler(backend)
+    handler = S3Handler(
+        backend,
+        multipart_upload_ttl=config.multipart_upload_ttl,
+    )
     app = web.Application(
         client_max_size=max_upload_bytes,
         middlewares=[s3_auth_middleware],
