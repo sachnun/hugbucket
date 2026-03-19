@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 
@@ -10,6 +11,16 @@ import aiohttp
 from hugbucket.hub.client import XetConnectionInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return True if the error is transient and the request can be retried."""
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return exc.status >= 500
+    # Connection-level errors are retryable
+    if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
+        return True
+    return False
 
 
 @dataclass
@@ -47,6 +58,9 @@ class CASClient:
     """Async client for Xet CAS endpoints."""
 
     pool_size: int = 0  # 0 = unlimited
+    upload_timeout: int = 300  # seconds per CAS upload request
+    max_retries: int = 3
+    retry_base_delay: float = 1.0  # seconds, doubles each retry
     _session: aiohttp.ClientSession | None = field(default=None, repr=False)
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
@@ -55,9 +69,11 @@ class CASClient:
                 limit=self.pool_size,
                 enable_cleanup_closed=True,
             )
+            timeout = aiohttp.ClientTimeout(total=self.upload_timeout)
             self._session = aiohttp.ClientSession(
                 connector=connector,
                 raise_for_status=False,
+                timeout=timeout,
             )
         return self._session
 
@@ -77,49 +93,100 @@ class CASClient:
         xorb_hash: str,
         xorb_data: bytes,
     ) -> bool:
-        """Upload a xorb to CAS. Returns True if newly inserted."""
-        session = await self._ensure_session()
+        """Upload a xorb to CAS. Returns True if newly inserted.
+
+        Retries on transient errors (5xx, connection errors, timeouts)
+        with exponential backoff.
+        """
         url = f"{conn.cas_url}/v1/xorbs/default/{xorb_hash}"
-        async with session.post(
-            url,
-            data=xorb_data,
-            headers={
-                **self._auth_headers(conn),
-                "Content-Type": "application/octet-stream",
-            },
-        ) as resp:
-            if resp.status >= 400:
-                body = await resp.text()
-                logger.error(
-                    f"CAS upload_xorb failed: {resp.status} {body} "
-                    f"url={url} xorb_size={len(xorb_data)}"
-                )
-                resp.raise_for_status()
-            data = await resp.json()
-            return data.get("was_inserted", False)
+        last_exc: BaseException | None = None
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                session = await self._ensure_session()
+                async with session.post(
+                    url,
+                    data=xorb_data,
+                    headers={
+                        **self._auth_headers(conn),
+                        "Content-Type": "application/octet-stream",
+                    },
+                ) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        logger.error(
+                            f"CAS upload_xorb failed: {resp.status} {body} "
+                            f"url={url} xorb_size={len(xorb_data)} "
+                            f"attempt={attempt + 1}/{self.max_retries + 1}"
+                        )
+                        resp.raise_for_status()
+                    data = await resp.json()
+                    return data.get("was_inserted", False)
+
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.max_retries and _is_retryable(exc):
+                    delay = self.retry_base_delay * (2**attempt)
+                    logger.warning(
+                        f"CAS upload_xorb transient error (attempt "
+                        f"{attempt + 1}/{self.max_retries + 1}), "
+                        f"retrying in {delay:.1f}s: {exc}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+
+        # Should not reach here, but just in case
+        raise last_exc  # type: ignore[misc]
 
     async def upload_shard(
         self,
         conn: XetConnectionInfo,
         shard_data: bytes,
     ) -> int:
-        """Upload a shard to CAS. Returns result code (0 or 1)."""
-        session = await self._ensure_session()
-        url = f"{conn.cas_url}/v1/shards"
-        async with session.post(
-            url,
-            data=shard_data,
-            headers={
-                **self._auth_headers(conn),
-                "Content-Type": "application/octet-stream",
-            },
-        ) as resp:
-            if resp.status >= 400:
-                body = await resp.text()
-                logger.error(f"CAS upload_shard failed: {resp.status} {body}")
-                resp.raise_for_status()
-            data = await resp.json()
-            return data.get("result", -1)
+        """Upload a shard to CAS. Returns result code (0 or 1).
+
+        Retries on transient errors (5xx, connection errors, timeouts)
+        with exponential backoff.
+        """
+        last_exc: BaseException | None = None
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                session = await self._ensure_session()
+                url = f"{conn.cas_url}/v1/shards"
+                async with session.post(
+                    url,
+                    data=shard_data,
+                    headers={
+                        **self._auth_headers(conn),
+                        "Content-Type": "application/octet-stream",
+                    },
+                ) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        logger.error(
+                            f"CAS upload_shard failed: {resp.status} {body} "
+                            f"attempt={attempt + 1}/{self.max_retries + 1}"
+                        )
+                        resp.raise_for_status()
+                    data = await resp.json()
+                    return data.get("result", -1)
+
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.max_retries and _is_retryable(exc):
+                    delay = self.retry_base_delay * (2**attempt)
+                    logger.warning(
+                        f"CAS upload_shard transient error (attempt "
+                        f"{attempt + 1}/{self.max_retries + 1}), "
+                        f"retrying in {delay:.1f}s: {exc}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+
+        raise last_exc  # type: ignore[misc]
 
     # ---- Download ----
 

@@ -45,6 +45,11 @@ class Config:
     # 0 = unlimited (no cap on simultaneous outbound connections).
     http_pool_size: int = 0
 
+    # Upload settings
+    cas_upload_timeout: int = 300  # 5 minutes per CAS request
+    cas_upload_retries: int = 3  # retry count for CAS xorb/shard uploads
+    cas_retry_base_delay: float = 1.0  # base delay (seconds) for exponential backoff
+
     # Cache settings
     xorb_cache_max_bytes: int = 512 * 1024 * 1024  # 512 MiB
     recon_cache_max_entries: int = 1024

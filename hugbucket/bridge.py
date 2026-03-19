@@ -258,7 +258,12 @@ class HFStorageBackend(StorageBackend):
 
     def __post_init__(self) -> None:
         self.hub = HubClient(config=self.config)
-        self.cas = CASClient(pool_size=self.config.http_pool_size)
+        self.cas = CASClient(
+            pool_size=self.config.http_pool_size,
+            upload_timeout=self.config.cas_upload_timeout,
+            max_retries=self.config.cas_upload_retries,
+            retry_base_delay=self.config.cas_retry_base_delay,
+        )
         self._xorb_cache = _XorbCache(max_bytes=self.config.xorb_cache_max_bytes)
 
     async def close(self) -> None:
