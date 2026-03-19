@@ -508,6 +508,9 @@ def verify_request(request: web.Request, config: Config) -> AuthError | None:
     Returns ``None`` when the request is authenticated, or an
     :class:`AuthError` describing the failure.
     """
+    if not config.s3_access_key and not config.s3_secret_key:
+        return None
+
     if request.headers.get("Authorization", ""):
         return _verify_header_auth(request, config)
 

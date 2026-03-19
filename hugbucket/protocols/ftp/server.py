@@ -42,12 +42,23 @@ def create_ftp_server(
     runner = BackendLoopRunner(backend)
 
     authorizer = DummyAuthorizer()
-    authorizer.add_user(
-        config.ftp_user,
-        config.ftp_password,
-        "/",
-        perm="elradfmwMT",
-    )
+    has_user = bool(config.ftp_user)
+    has_password = bool(config.ftp_password)
+    if has_user and has_password:
+        authorizer.add_user(
+            config.ftp_user,
+            config.ftp_password,
+            "/",
+            perm="elradfmwMT",
+        )
+    elif not has_user and not has_password:
+        authorizer.add_anonymous("/", perm="elradfmwMT")
+        logger.warning("FTP auth disabled: allowing anonymous login")
+    else:
+        raise ValueError(
+            "FTP auth config invalid: set both FTP_USERNAME and FTP_PASSWORD, "
+            "or leave both empty for anonymous access."
+        )
 
     def _on_connect(self) -> None:  # type: ignore[no-untyped-def]
         logger.debug("FTP connect from %s", self.remote_ip)

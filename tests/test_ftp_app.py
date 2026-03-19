@@ -38,6 +38,7 @@ def test_ftp_main_starts_server(monkeypatch) -> None:
         lambda config, backend: (server, runner),
     )
     monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("MODE", "ftp")
     monkeypatch.setattr(ftp_app.sys, "argv", ["hugbucket-ftp"])
 
     ftp_app.main()
@@ -52,6 +53,7 @@ def test_ftp_main_starts_server(monkeypatch) -> None:
 
 def test_ftp_main_requires_hf_token(monkeypatch) -> None:
     monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("MODE", "ftp")
     monkeypatch.setattr(ftp_app.sys, "argv", ["hugbucket-ftp"])
     with pytest.raises(SystemExit) as exc:
         ftp_app.main()
@@ -79,6 +81,7 @@ def test_ftp_main_reads_username_password_from_env(monkeypatch) -> None:
 
     monkeypatch.setattr(ftp_app, "create_ftp_server", _create_server)
     monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("MODE", "ftp")
     monkeypatch.setenv("FTP_USERNAME", "ftpuser")
     monkeypatch.setenv("FTP_PASSWORD", "ftppass")
     monkeypatch.setattr(ftp_app.sys, "argv", ["hugbucket-ftp"])
@@ -86,3 +89,25 @@ def test_ftp_main_reads_username_password_from_env(monkeypatch) -> None:
     ftp_app.main()
     assert seen["user"] == "ftpuser"
     assert seen["password"] == "ftppass"
+
+
+def test_ftp_main_requires_mode(monkeypatch) -> None:
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.delenv("MODE", raising=False)
+    monkeypatch.setattr(ftp_app.sys, "argv", ["hugbucket-ftp"])
+
+    with pytest.raises(SystemExit) as exc:
+        ftp_app.main()
+
+    assert exc.value.code == 2
+
+
+def test_ftp_main_rejects_wrong_mode(monkeypatch) -> None:
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("MODE", "s3")
+    monkeypatch.setattr(ftp_app.sys, "argv", ["hugbucket-ftp"])
+
+    with pytest.raises(SystemExit) as exc:
+        ftp_app.main()
+
+    assert exc.value.code == 2

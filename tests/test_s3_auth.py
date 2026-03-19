@@ -295,6 +295,33 @@ class TestUnauthenticatedRejection:
         assert resp.status == 403
 
 
+class TestAuthDisabled:
+    """Requests are allowed when S3 auth credentials are unset."""
+
+    @pytest.fixture
+    def app_no_s3_auth(self, mock_bridge: MagicMock) -> web.Application:
+        application = web.Application(
+            client_max_size=16 * 1024 * 1024,
+            middlewares=[s3_auth_middleware],
+        )
+        application["config"] = Config(s3_access_key="", s3_secret_key="")
+        handler = S3Handler(mock_bridge)
+        handler.setup_routes(application)
+        return application
+
+    @pytest.fixture
+    async def client_no_s3_auth(
+        self,
+        aiohttp_client,
+        app_no_s3_auth: web.Application,
+    ) -> TestClient:
+        return await aiohttp_client(app_no_s3_auth)
+
+    async def test_unsigned_get_root_allowed(self, client_no_s3_auth: TestClient) -> None:
+        resp = await client_no_s3_auth.get("/")
+        assert resp.status == 200
+
+
 # ── tests: wrong credentials → specific error codes ─────────────────────
 
 

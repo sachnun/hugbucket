@@ -7,11 +7,28 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from hugbucket.config import Config
 from hugbucket.protocols.ftp.server import create_ftp_server
 from hugbucket.providers.hf.backend import HFStorageBackend
+
+
+def _require_mode(expected_mode: str) -> None:
+    raw_mode = os.environ.get("MODE")
+    if raw_mode is None or not raw_mode.strip():
+        logging.error("MODE is required. Set MODE=%s.", expected_mode)
+        sys.exit(2)
+
+    mode = raw_mode.strip().lower()
+    if mode != expected_mode:
+        logging.error(
+            "Invalid MODE for this entrypoint. Expected MODE=%s, got %r.",
+            expected_mode,
+            raw_mode,
+        )
+        sys.exit(2)
 
 
 def main() -> None:
@@ -37,6 +54,8 @@ def main() -> None:
         ftp_host=args.host,
         ftp_port=args.port,
     )
+
+    _require_mode("ftp")
 
     if not config.hf_token:
         logging.error("No HF token provided. Set HF_TOKEN env.")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from aiohttp import web
@@ -11,6 +12,29 @@ from aiohttp import web
 from hugbucket.config import Config
 from hugbucket.protocols.s3.app import create_s3_app
 from hugbucket.providers.hf.backend import HFStorageBackend
+
+
+def _require_mode(expected_mode: str) -> None:
+    raw_mode = os.environ.get("MODE")
+    if raw_mode is None or not raw_mode.strip():
+        logging.error("MODE is required. Set MODE=%s.", expected_mode)
+        sys.exit(2)
+
+    mode = raw_mode.strip().lower()
+    if mode != expected_mode:
+        logging.error(
+            "Invalid MODE for this entrypoint. Expected MODE=%s, got %r.",
+            expected_mode,
+            raw_mode,
+        )
+        sys.exit(2)
+
+
+def _mode_for_message() -> str:
+    raw_mode = os.environ.get("MODE")
+    if raw_mode is None:
+        return ""
+    return raw_mode.strip().lower()
 
 
 def main() -> None:
@@ -38,9 +62,18 @@ def main() -> None:
         port=args.port,
     )
 
+    _require_mode("s3")
+
+    current_mode = _mode_for_message()
+
     if not config.hf_token:
         logging.error("No HF token provided. Set HF_TOKEN env.")
         sys.exit(1)
+
+    if current_mode == "s3" and not config.s3_access_key and not config.s3_secret_key:
+        logging.warning(
+            "S3 authentication is disabled (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY empty)."
+        )
 
     backend = HFStorageBackend(config=config)
     app = create_s3_app(

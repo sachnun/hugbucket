@@ -13,8 +13,6 @@ docker run -d \
   -p 9000:9000 \
   -e MODE=s3 \
   -e HF_TOKEN=hf_xxxxx \
-  -e AWS_ACCESS_KEY_ID=hugbucket \
-  -e AWS_SECRET_ACCESS_KEY=hugbucket \
   ghcr.io/sachnun/hugbucket
 ```
 
@@ -26,8 +24,6 @@ docker run -d \
   -p 30000-30099:30000-30099 \
   -e MODE=ftp \
   -e HF_TOKEN=hf_xxxxx \
-  -e FTP_USERNAME=hugbucket \
-  -e FTP_PASSWORD=hugbucket \
   ghcr.io/sachnun/hugbucket
 ```
 
@@ -52,19 +48,19 @@ Path mapping for FTP is `/<bucket>/<key>`.
 
 ## Environment Variables
 
-Required:
-
-- `MODE`
-- `HF_TOKEN`
-
-Optional:
-
-- `HF_ENDPOINT` (default: `https://huggingface.co`)
-- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (default: `hugbucket`)
-- `FTP_HOST`, `FTP_PORT` (default: `0.0.0.0:2121`)
-- `FTP_USERNAME`, `FTP_PASSWORD` (default: `hugbucket` / `hugbucket`)
-- `FTP_BANNER` (default: `HugBucket FTP ready`)
-- `FTP_PASSIVE_MIN_PORT`, `FTP_PASSIVE_MAX_PORT` (default: `30000` / `30099`)
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODE`<sup>*</sup> | - | Protocol selector: `s3` or `ftp` |
+| `HF_TOKEN`<sup>*</sup> | - | Hugging Face access token |
+| `AWS_ACCESS_KEY_ID` | empty | S3 access key used by clients; leave empty to disable S3 auth |
+| `AWS_SECRET_ACCESS_KEY` | empty | S3 secret key used by clients; leave empty to disable S3 auth |
+| `FTP_HOST` | `0.0.0.0` | FTP bind host |
+| `FTP_PORT` | `2121` | FTP bind port |
+| `FTP_USERNAME` | empty | FTP login username; leave empty with `FTP_PASSWORD` for anonymous FTP |
+| `FTP_PASSWORD` | empty | FTP login password; leave empty with `FTP_USERNAME` for anonymous FTP |
+| `FTP_BANNER` | `HugBucket FTP ready` | FTP server welcome banner |
+| `FTP_PASSIVE_MIN_PORT` | `30000` | FTP passive mode range start |
+| `FTP_PASSIVE_MAX_PORT` | `30099` | FTP passive mode range end |
 
 ## Development
 

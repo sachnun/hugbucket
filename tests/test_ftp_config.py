@@ -9,8 +9,8 @@ def test_ftp_config_defaults() -> None:
     cfg = Config()
     assert cfg.ftp_host == "0.0.0.0"
     assert cfg.ftp_port == 2121
-    assert cfg.ftp_user == "hugbucket"
-    assert cfg.ftp_password == "hugbucket"
+    assert cfg.ftp_user == ""
+    assert cfg.ftp_password == ""
     assert cfg.ftp_passive_min_port == 30000
     assert cfg.ftp_passive_max_port == 30099
 

@@ -25,10 +25,10 @@ class Config:
     ftp_host: str = field(default_factory=lambda: os.environ.get("FTP_HOST", "0.0.0.0"))
     ftp_port: int = field(default_factory=lambda: _env_int("FTP_PORT", 2121))
     ftp_user: str = field(
-        default_factory=lambda: os.environ.get("FTP_USERNAME", "hugbucket")
+        default_factory=lambda: os.environ.get("FTP_USERNAME", "")
     )
     ftp_password: str = field(
-        default_factory=lambda: os.environ.get("FTP_PASSWORD", "hugbucket")
+        default_factory=lambda: os.environ.get("FTP_PASSWORD", "")
     )
     ftp_banner: str = field(
         default_factory=lambda: os.environ.get("FTP_BANNER", "HugBucket FTP ready")
@@ -41,17 +41,15 @@ class Config:
     )
 
     # HF Hub settings
-    hf_endpoint: str = field(
-        default_factory=lambda: os.environ.get("HF_ENDPOINT", "https://huggingface.co")
-    )
+    hf_endpoint: str = "https://huggingface.co"
     hf_token: str = field(default_factory=lambda: os.environ.get("HF_TOKEN", ""))
 
     # S3 auth — maps to HF token
     s3_access_key: str = field(
-        default_factory=lambda: os.environ.get("AWS_ACCESS_KEY_ID", "hugbucket")
+        default_factory=lambda: os.environ.get("AWS_ACCESS_KEY_ID", "")
     )
     s3_secret_key: str = field(
-        default_factory=lambda: os.environ.get("AWS_SECRET_ACCESS_KEY", "hugbucket")
+        default_factory=lambda: os.environ.get("AWS_SECRET_ACCESS_KEY", "")
     )
 
     # HF namespace (user or org that owns the buckets)
