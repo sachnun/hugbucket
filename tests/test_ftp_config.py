@@ -11,17 +11,10 @@ def test_ftp_config_defaults() -> None:
     assert cfg.ftp_port == 2121
     assert cfg.ftp_user == ""
     assert cfg.ftp_password == ""
-    assert cfg.ftp_passive_min_port == 30000
-    assert cfg.ftp_passive_max_port == 30099
 
 
-def test_ftp_port_env_parsing(monkeypatch) -> None:
-    monkeypatch.setenv("FTP_PORT", "2200")
+def test_port_env_does_not_override_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("PORT", "2200")
     cfg = Config()
-    assert cfg.ftp_port == 2200
-
-
-def test_ftp_port_env_invalid_falls_back(monkeypatch) -> None:
-    monkeypatch.setenv("FTP_PORT", "not-int")
-    cfg = Config()
+    assert cfg.port == 9000
     assert cfg.ftp_port == 2121

@@ -57,10 +57,7 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    config = Config(
-        host=args.host,
-        port=args.port,
-    )
+    config = Config(host=args.host, port=args.port)
 
     _require_mode("s3")
 

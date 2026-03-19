@@ -74,15 +74,7 @@ def create_ftp_server(
     handler_cls.authorizer = authorizer
     handler_cls.banner = config.ftp_banner
     handler_cls.backend_runner = runner
-
-    if (
-        config.ftp_passive_min_port > 0
-        and config.ftp_passive_max_port >= config.ftp_passive_min_port
-    ):
-        handler_cls.passive_ports = range(
-            config.ftp_passive_min_port,
-            config.ftp_passive_max_port + 1,
-        )
+    handler_cls.passive_ports = range(30000, 30100)
 
     server = FTPServer((config.ftp_host, config.ftp_port), handler_cls)
     return server, runner

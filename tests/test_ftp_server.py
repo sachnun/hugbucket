@@ -48,8 +48,6 @@ def test_create_ftp_server_returns_server_and_runner(monkeypatch) -> None:
         ftp_port=2121,
         ftp_user="u",
         ftp_password="p",
-        ftp_passive_min_port=30000,
-        ftp_passive_max_port=30010,
     )
     server, runner = create_ftp_server(config=config, backend=backend)
 
@@ -93,10 +91,10 @@ def test_create_ftp_server_without_passive_range(monkeypatch) -> None:
     )
     monkeypatch.setattr("hugbucket.protocols.ftp.server.BackendLoopRunner", _FakeRunner)
 
-    config = Config(ftp_user="u", ftp_password="p", ftp_passive_min_port=0, ftp_passive_max_port=0)
+    config = Config(ftp_user="u", ftp_password="p")
     create_ftp_server(config=config, backend=backend)
 
-    assert not hasattr(created["handler"], "passive_ports")
+    assert list(created["handler"].passive_ports) == list(range(30000, 30100))
 
 
 def test_create_ftp_server_allows_anonymous_when_auth_empty(monkeypatch) -> None:

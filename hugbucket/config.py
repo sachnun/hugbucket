@@ -4,16 +4,6 @@ import os
 from dataclasses import dataclass, field
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
 @dataclass
 class Config:
     # S3 gateway settings
@@ -22,8 +12,8 @@ class Config:
     region: str = "us-east-1"
 
     # FTP gateway settings
-    ftp_host: str = field(default_factory=lambda: os.environ.get("FTP_HOST", "0.0.0.0"))
-    ftp_port: int = field(default_factory=lambda: _env_int("FTP_PORT", 2121))
+    ftp_host: str = "0.0.0.0"
+    ftp_port: int = 2121
     ftp_user: str = field(
         default_factory=lambda: os.environ.get("FTP_USERNAME", "")
     )
@@ -32,12 +22,6 @@ class Config:
     )
     ftp_banner: str = field(
         default_factory=lambda: os.environ.get("FTP_BANNER", "HugBucket FTP ready")
-    )
-    ftp_passive_min_port: int = field(
-        default_factory=lambda: _env_int("FTP_PASSIVE_MIN_PORT", 30000)
-    )
-    ftp_passive_max_port: int = field(
-        default_factory=lambda: _env_int("FTP_PASSIVE_MAX_PORT", 30099)
     )
 
     # HF Hub settings

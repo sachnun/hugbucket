@@ -50,10 +50,7 @@ def main() -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    config = Config(
-        ftp_host=args.host,
-        ftp_port=args.port,
-    )
+    config = Config(ftp_host=args.host, ftp_port=args.port)
 
     _require_mode("ftp")
 
