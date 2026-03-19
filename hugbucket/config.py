@@ -14,16 +14,10 @@ class Config:
     # FTP gateway settings
     ftp_host: str = "0.0.0.0"
     ftp_port: int = 2121
-    ftp_user: str = field(
-        default_factory=lambda: os.environ.get("FTP_USERNAME", "")
-    )
+    ftp_user: str = field(default_factory=lambda: os.environ.get("FTP_USERNAME", ""))
     ftp_password: str = field(
         default_factory=lambda: os.environ.get("FTP_PASSWORD", "")
     )
-    ftp_banner: str = field(
-        default_factory=lambda: os.environ.get("FTP_BANNER", "HugBucket FTP ready")
-    )
-
     # HF Hub settings
     hf_endpoint: str = "https://huggingface.co"
     hf_token: str = field(default_factory=lambda: os.environ.get("HF_TOKEN", ""))

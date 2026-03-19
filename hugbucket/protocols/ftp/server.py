@@ -72,7 +72,7 @@ def create_ftp_server(
     handler_cls.on_connect = _on_connect
     handler_cls.on_disconnect = _on_disconnect
     handler_cls.authorizer = authorizer
-    handler_cls.banner = config.ftp_banner
+    handler_cls.banner = "HugBucket FTP ready"
     handler_cls.backend_runner = runner
     handler_cls.passive_ports = range(30000, 30100)
 
