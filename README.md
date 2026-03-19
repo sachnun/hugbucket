@@ -54,13 +54,9 @@ Path mapping for FTP is `/<bucket>/<key>`.
 | `HF_TOKEN`<sup>*</sup> | - | Hugging Face token |
 | `AWS_ACCESS_KEY_ID` | - | S3 access key |
 | `AWS_SECRET_ACCESS_KEY` | - | S3 secret key |
-| `FTP_HOST` | `0.0.0.0` | FTP host |
-| `FTP_PORT` | `2121` | FTP port |
 | `FTP_USERNAME` | - | FTP username |
 | `FTP_PASSWORD` | - | FTP password |
 | `FTP_BANNER` | `HugBucket FTP ready` | FTP banner |
-| `FTP_PASSIVE_MIN_PORT` | `30000` | FTP passive min port |
-| `FTP_PASSIVE_MAX_PORT` | `30099` | FTP passive max port |
 
 ## Development
 
