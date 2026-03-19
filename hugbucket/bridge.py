@@ -15,6 +15,7 @@ import mimetypes
 import time
 from dataclasses import dataclass, field
 
+from hugbucket.core.backend import StorageBackend
 from hugbucket.config import Config
 from hugbucket.hub.client import HubClient, BucketInfo, BucketFile, XetConnectionInfo
 from hugbucket.xet.cas_client import CASClient, Reconstruction, ReconstructionTerm
@@ -238,7 +239,7 @@ class _XorbCache:
 
 
 @dataclass
-class Bridge:
+class HFStorageBackend(StorageBackend):
     """Orchestrates S3 <-> HF Bucket operations."""
 
     config: Config
@@ -263,6 +264,10 @@ class Bridge:
     async def close(self) -> None:
         await self.hub.close()
         await self.cas.close()
+
+    async def resolve_namespace(self) -> str:
+        """Resolve namespace from the configured HF token."""
+        return await self.hub.whoami()
 
     def _bucket_id(self, bucket_name: str) -> str:
         """Convert S3 bucket name to HF bucket_id (namespace/name)."""
@@ -378,6 +383,7 @@ class Bridge:
         to a thread so the event loop stays responsive during uploads.
         """
         bucket_id = self._bucket_id(bucket)
+        requested_size = len(data)
 
         # S3 clients create "folders" by PUTting a zero-byte object with a
         # trailing slash (e.g. "my-folder/").  HF Storage Buckets use virtual
@@ -435,7 +441,7 @@ class Bridge:
         )
 
         self._invalidate_file_info(bucket_id, key)
-        return {"ETag": f'"{prepared.etag}"', "size": len(data)}
+        return {"ETag": f'"{prepared.etag}"', "size": requested_size}
 
     async def _put_empty_file(self, bucket_id: str, key: str) -> dict:
         """Handle zero-byte file (no Xet upload needed)."""
@@ -812,3 +818,7 @@ class Bridge:
             "is_truncated": truncated,
             "next_continuation_token": next_token,
         }
+
+
+# Backward-compatible name kept for existing imports/tests.
+Bridge = HFStorageBackend

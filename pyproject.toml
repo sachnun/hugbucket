@@ -9,10 +9,13 @@ dependencies = [
     "awscli>=1.44.55",
     "blake3>=1.0",
     "lz4>=4.3",
+    "pyftpdlib>=2.1.0",
 ]
 
 [project.scripts]
 hugbucket = "hugbucket.main:main"
+hugbucket-s3 = "hugbucket.apps.s3:main"
+hugbucket-ftp = "hugbucket.apps.ftp:main"
 
 [dependency-groups]
 dev = [
@@ -27,8 +30,8 @@ dev = [
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["hugbucket", "hugbucket.hub", "hugbucket.s3", "hugbucket.xet"]
+[tool.setuptools.packages.find]
+include = ["hugbucket*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

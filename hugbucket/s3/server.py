@@ -19,7 +19,7 @@ from xml.etree.ElementTree import fromstring
 
 from aiohttp import web
 
-from hugbucket.bridge import Bridge
+from hugbucket.core.backend import StorageBackend
 from hugbucket.s3.xml_responses import (
     list_buckets_xml,
     list_objects_v2_xml,
@@ -86,7 +86,7 @@ def _parse_bucket_key(request: web.Request) -> tuple[str, str]:
 class S3Handler:
     """Handles S3 API requests."""
 
-    def __init__(self, bridge: Bridge) -> None:
+    def __init__(self, bridge: StorageBackend) -> None:
         self.bridge = bridge
         # In-memory multipart upload state: upload_id -> {bucket, key, parts: {part_num: bytes}}
         self._multipart_uploads: dict[str, dict] = {}

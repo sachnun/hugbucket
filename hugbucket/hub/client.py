@@ -10,6 +10,7 @@ from urllib.parse import quote
 import aiohttp
 
 from hugbucket.config import Config
+from hugbucket.core.models import BucketFile, BucketInfo
 
 logger = logging.getLogger(__name__)
 
@@ -17,25 +18,6 @@ logger = logging.getLogger(__name__)
 BATCH_ADD_CHUNK_SIZE = 100
 BATCH_DELETE_CHUNK_SIZE = 1000
 PATHS_INFO_BATCH_SIZE = 1000
-
-
-@dataclass
-class BucketInfo:
-    id: str
-    private: bool
-    created_at: str
-    size: int
-    total_files: int
-
-
-@dataclass
-class BucketFile:
-    type: str  # "file" or "directory"
-    path: str
-    size: int = 0
-    xet_hash: str = ""
-    mtime: str = ""
-    uploaded_at: str = ""
 
 
 @dataclass
