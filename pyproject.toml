@@ -40,3 +40,6 @@ testpaths = ["tests"]
 markers = [
     "integration: tests that hit live HF API (deselect with '-m not integration')",
 ]
+filterwarnings = [
+    "ignore:enable_cleanup_closed ignored because:DeprecationWarning:aiohttp",
+]
