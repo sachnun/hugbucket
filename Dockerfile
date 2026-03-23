@@ -14,6 +14,7 @@ RUN uv sync --no-dev
 
 EXPOSE 9000
 EXPOSE 2121
+EXPOSE 8080
 EXPOSE 30000-30099
 
 ENTRYPOINT ["uv", "run", "hugbucket"]

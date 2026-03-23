@@ -16,6 +16,7 @@ dependencies = [
 hugbucket = "hugbucket.main:main"
 hugbucket-s3 = "hugbucket.apps.s3:main"
 hugbucket-ftp = "hugbucket.apps.ftp:main"
+hugbucket-webdav = "hugbucket.apps.webdav:main"
 
 [dependency-groups]
 dev = [

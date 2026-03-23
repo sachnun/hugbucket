@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import sys
 
-VALID_MODES = {"s3", "ftp"}
+VALID_MODES = {"s3", "ftp", "webdav"}
 
 
 def _normalize_mode(value: str) -> str:
@@ -20,11 +20,11 @@ def _normalize_mode(value: str) -> str:
 
 def _resolve_mode(env_mode: str | None) -> str:
     if env_mode is None or not env_mode.strip():
-        raise ValueError("missing MODE env (expected: s3 or ftp)")
+        raise ValueError("missing MODE env (expected: s3, ftp, or webdav)")
 
     mode = _normalize_mode(env_mode)
     if mode not in VALID_MODES:
-        raise ValueError(f"invalid MODE '{mode}' (expected: s3 or ftp)")
+        raise ValueError(f"invalid MODE '{mode}' (expected: s3, ftp, or webdav)")
     return mode
 
 
@@ -40,6 +40,12 @@ def _run_ftp() -> None:
     ftp_main()
 
 
+def _run_webdav() -> None:
+    from hugbucket.apps.webdav import main as webdav_main
+
+    webdav_main()
+
+
 def main() -> None:
     try:
         mode = _resolve_mode(os.environ.get("MODE"))
@@ -49,6 +55,9 @@ def main() -> None:
 
     if mode == "ftp":
         _run_ftp()
+        return
+    if mode == "webdav":
+        _run_webdav()
         return
     _run_s3()
 

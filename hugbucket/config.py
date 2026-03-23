@@ -18,6 +18,16 @@ class Config:
     ftp_password: str = field(
         default_factory=lambda: os.environ.get("FTP_PASSWORD", "")
     )
+
+    # WebDAV gateway settings
+    webdav_host: str = "0.0.0.0"
+    webdav_port: int = 8080
+    webdav_user: str = field(
+        default_factory=lambda: os.environ.get("WEBDAV_USERNAME", "")
+    )
+    webdav_password: str = field(
+        default_factory=lambda: os.environ.get("WEBDAV_PASSWORD", "")
+    )
     # HF Hub settings
     hf_endpoint: str = "https://huggingface.co"
     hf_token: str = field(default_factory=lambda: os.environ.get("HF_TOKEN", ""))
