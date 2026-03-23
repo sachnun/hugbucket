@@ -9,6 +9,7 @@ Path mapping: /<bucket>/<key> (same as S3 and FTP adapters).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import mimetypes
@@ -631,10 +632,17 @@ class WebDAVHandler:
             if not files:
                 return _dav_error(404, "Source not found")
 
-            for f in files:
-                rel = f.path[len(src_prefix) :]
-                new_key = dst_prefix + rel
-                await self.backend.copy_object(src_bucket, f.path, dst_bucket, new_key)
+            await asyncio.gather(
+                *(
+                    self.backend.copy_object(
+                        src_bucket,
+                        f.path,
+                        dst_bucket,
+                        dst_prefix + f.path[len(src_prefix) :],
+                    )
+                    for f in files
+                )
+            )
 
             return web.Response(status=201)
         except FileNotFoundError:
@@ -687,10 +695,17 @@ class WebDAVHandler:
             if not files:
                 return _dav_error(404, "Source not found")
 
-            for f in files:
-                rel = f.path[len(src_prefix) :]
-                new_key = dst_prefix + rel
-                await self.backend.copy_object(src_bucket, f.path, dst_bucket, new_key)
+            await asyncio.gather(
+                *(
+                    self.backend.copy_object(
+                        src_bucket,
+                        f.path,
+                        dst_bucket,
+                        dst_prefix + f.path[len(src_prefix) :],
+                    )
+                    for f in files
+                )
+            )
 
             # Delete originals
             keys_to_delete = [f.path for f in files]

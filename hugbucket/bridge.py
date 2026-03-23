@@ -418,9 +418,13 @@ class HFStorageBackend(StorageBackend):
         # Get write token (network I/O, stays on event loop)
         conn = await self.hub.get_xet_write_token(bucket_id)
 
-        # Upload xorbs to CAS (network I/O)
-        for batch in prepared.xorb_batches:
-            await self.cas.upload_xorb(conn, batch.xorb_hash_hex, batch.xorb_bytes)
+        # Upload xorbs to CAS concurrently (network I/O)
+        await asyncio.gather(
+            *(
+                self.cas.upload_xorb(conn, batch.xorb_hash_hex, batch.xorb_bytes)
+                for batch in prepared.xorb_batches
+            )
+        )
 
         # Build shard (CPU-bound, offload to thread)
         xorb_infos = [b.xorb_info for b in prepared.xorb_batches]
