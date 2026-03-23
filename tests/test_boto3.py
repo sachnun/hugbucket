@@ -107,12 +107,57 @@ def s3(s3_server):
 
 @pytest.fixture(scope="session")
 def bucket(s3, s3_server):
-    """Create a temporary bucket, yield its name, delete on teardown."""
+    """Create a temporary bucket, yield its name, delete on teardown.
+
+    Teardown lists every object inside the bucket and deletes them
+    individually before deleting the bucket — so leftover files from
+    failed tests never prevent bucket removal.
+    """
     name = f"pytest-b3-{int(time.time()) % 100000}"
     s3.create_bucket(Bucket=name)
     yield name
+    _drain_and_delete_bucket(s3, name)
+
+
+# ── cleanup helpers ──────────────────────────────────────────────────────
+
+
+def _drain_and_delete_bucket(s3, bucket_name: str) -> None:
+    """Delete every object inside *bucket_name*, then delete the bucket.
+
+    Uses list_objects_v2 to discover all keys and deletes them one-by-one.
+    Silently ignores errors so that a partial cleanup never masks the
+    original test failure.
+    """
     try:
-        s3.delete_bucket(Bucket=name)
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket_name):
+            for obj in page.get("Contents", []):
+                try:
+                    s3.delete_object(Bucket=bucket_name, Key=obj["Key"])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Also abort any in-progress multipart uploads
+    try:
+        resp = s3.list_multipart_uploads(Bucket=bucket_name)
+        for upload in resp.get("Uploads", []):
+            try:
+                s3.abort_multipart_upload(
+                    Bucket=bucket_name,
+                    Key=upload["Key"],
+                    UploadId=upload["UploadId"],
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Now delete the (hopefully empty) bucket
+    try:
+        s3.delete_bucket(Bucket=bucket_name)
     except Exception:
         pass
 
