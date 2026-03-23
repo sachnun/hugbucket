@@ -647,13 +647,18 @@ class S3Handler:
                     resource=f"/{bucket}/{key}",
                 )
 
-            if upload["status"] != self._MP_COLLECTING:
+            if upload["status"] not in (self._MP_COLLECTING, self._MP_FAILED):
                 return _s3_error(
                     409,
                     "InvalidRequest",
                     "Upload is no longer accepting parts.",
                     resource=f"/{bucket}/{key}",
                 )
+
+            # If the upload previously failed, reset to collecting so parts
+            # can be re-uploaded before retrying completion.
+            if upload["status"] == self._MP_FAILED:
+                upload["status"] = self._MP_COLLECTING
 
             data = await request.read()
             etag = await asyncio.to_thread(lambda: f'"{hashlib.md5(data).hexdigest()}"')
