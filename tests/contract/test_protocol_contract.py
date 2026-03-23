@@ -1,4 +1,4 @@
-"""Cross-protocol contract tests (S3 and FTP).
+"""Cross-protocol contract tests (S3, FTP, and WebDAV).
 
 These tests verify that different protocol adapters map to the same
 StorageBackend semantics.
@@ -16,6 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from hugbucket.core.models import BucketFile, BucketInfo
 from hugbucket.protocols.ftp.filesystem import HugBucketFTPFilesystem
+from hugbucket.protocols.webdav.server import WebDAVHandler
 from hugbucket.s3.server import S3Handler
 
 
@@ -25,6 +26,7 @@ class _Runner:
 
     def call(self, awaitable):  # type: ignore[no-untyped-def]
         if inspect.isawaitable(awaitable):
+
             async def _await_value() -> object:
                 return await awaitable
 
@@ -48,7 +50,9 @@ def _new_backend_mock() -> MagicMock:
     b = MagicMock()
     b.list_buckets = AsyncMock(
         return_value=[
-            BucketInfo(id="ns/bucket", private=False, created_at="", size=0, total_files=0)
+            BucketInfo(
+                id="ns/bucket", private=False, created_at="", size=0, total_files=0
+            )
         ]
     )
     b.head_bucket = AsyncMock(
@@ -127,6 +131,70 @@ async def _s3_get_missing(backend: MagicMock, path: str) -> int:
         await server.close()
 
 
+# ── WebDAV helpers ───────────────────────────────────────────────────────
+
+
+async def _webdav_put_object(backend: MagicMock, path: str, data: bytes) -> int:
+    app = web.Application()
+    WebDAVHandler(backend).setup_routes(app)
+    server = TestServer(app)
+    await server.start_server()
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        resp = await client.put(path, data=data)
+        return resp.status
+    finally:
+        await client.close()
+        await server.close()
+
+
+async def _webdav_delete_object(backend: MagicMock, path: str) -> int:
+    """DELETE via WebDAV — requires head_object to return a file for file deletes."""
+    app = web.Application()
+    WebDAVHandler(backend).setup_routes(app)
+    server = TestServer(app)
+    await server.start_server()
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        resp = await client.delete(path)
+        return resp.status
+    finally:
+        await client.close()
+        await server.close()
+
+
+async def _webdav_get_missing(backend: MagicMock, path: str) -> int:
+    app = web.Application()
+    WebDAVHandler(backend).setup_routes(app)
+    server = TestServer(app)
+    await server.start_server()
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        resp = await client.get(path)
+        return resp.status
+    finally:
+        await client.close()
+        await server.close()
+
+
+async def _webdav_mkcol(backend: MagicMock, path: str) -> int:
+    app = web.Application()
+    WebDAVHandler(backend).setup_routes(app)
+    server = TestServer(app)
+    await server.start_server()
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        resp = await client.request("MKCOL", path)
+        return resp.status
+    finally:
+        await client.close()
+        await server.close()
+
+
 def test_write_path_contract_s3_and_ftp() -> None:
     backend = _new_backend_mock()
 
@@ -143,6 +211,15 @@ def test_write_path_contract_s3_and_ftp() -> None:
     backend.put_object.assert_awaited_once_with("bucket", "dir/file.txt", b"abc")
 
 
+def test_write_path_contract_webdav() -> None:
+    """WebDAV PUT maps to the same backend.put_object call as S3 and FTP."""
+    backend = _new_backend_mock()
+
+    status = asyncio.run(_webdav_put_object(backend, "/bucket/dir/file.txt", b"abc"))
+    assert status == 201
+    backend.put_object.assert_awaited_once_with("bucket", "dir/file.txt", b"abc")
+
+
 def test_folder_creation_contract_s3_and_ftp() -> None:
     backend = _new_backend_mock()
 
@@ -156,6 +233,15 @@ def test_folder_creation_contract_s3_and_ftp() -> None:
     backend.put_object.assert_awaited_once_with("bucket", "folder/", b"")
 
 
+def test_folder_creation_contract_webdav() -> None:
+    """WebDAV MKCOL maps to the same backend.put_object('key/', b'') as S3 and FTP."""
+    backend = _new_backend_mock()
+
+    status = asyncio.run(_webdav_mkcol(backend, "/bucket/folder"))
+    assert status == 201
+    backend.put_object.assert_awaited_once_with("bucket", "folder/", b"")
+
+
 def test_delete_contract_s3_and_ftp() -> None:
     backend = _new_backend_mock()
 
@@ -166,6 +252,18 @@ def test_delete_contract_s3_and_ftp() -> None:
     backend.delete_object.reset_mock()
     fs = _build_ftp_fs(backend)
     fs.remove("/bucket/dir/file.txt")
+    backend.delete_object.assert_awaited_once_with("bucket", "dir/file.txt")
+
+
+def test_delete_contract_webdav() -> None:
+    """WebDAV DELETE on a file maps to backend.delete_object like S3 and FTP."""
+    backend = _new_backend_mock()
+    backend.head_object = AsyncMock(
+        return_value=BucketFile(type="file", path="dir/file.txt", size=3)
+    )
+
+    status = asyncio.run(_webdav_delete_object(backend, "/bucket/dir/file.txt"))
+    assert status == 204
     backend.delete_object.assert_awaited_once_with("bucket", "dir/file.txt")
 
 
@@ -184,6 +282,16 @@ def test_missing_file_contract_s3_and_ftp() -> None:
         pass
     else:
         raise AssertionError("FTP open must raise FileNotFoundError for missing file")
+
+
+def test_missing_file_contract_webdav() -> None:
+    """WebDAV GET on a missing file returns 404 like S3 and FTP."""
+    backend = _new_backend_mock()
+    backend.head_object = AsyncMock(return_value=None)
+    backend.get_object_stream = AsyncMock(return_value=None)
+
+    status = asyncio.run(_webdav_get_missing(backend, "/bucket/missing.txt"))
+    assert status == 404
 
 
 def test_list_contract_root_buckets() -> None:
