@@ -415,7 +415,7 @@ class WebDAVHandler:
 
             await response.write_eof()
             return response
-        except ConnectionResetError, ConnectionError:
+        except (ConnectionResetError, ConnectionError):
             logger.debug("GET: client disconnected for %s", request.path)
             return web.Response(status=499)
         except Exception as e:
