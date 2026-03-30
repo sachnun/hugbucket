@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from urllib.parse import unquote
 from xml.etree.ElementTree import fromstring
 
+import aiohttp
 from aiohttp import web
 
 from hugbucket.core.backend import StorageBackend
@@ -337,6 +338,12 @@ class S3Handler:
 
             body_xml = delete_result_xml(deleted, errors or None)
             return web.Response(status=200, content_type=XML_CONTENT, body=body_xml)
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                logger.warning("DeleteObjects: bucket '%s' not found upstream", bucket)
+                return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
+            logger.exception("DeleteObjects failed")
+            return _s3_error(500, "InternalError", str(e))
         except Exception as e:
             logger.exception("DeleteObjects failed")
             return _s3_error(500, "InternalError", str(e))
@@ -383,6 +390,12 @@ class S3Handler:
                 key_count=len(contents),
             )
             return web.Response(status=200, content_type=XML_CONTENT, body=body)
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                logger.warning("ListObjectsV2: bucket '%s' not found upstream", bucket)
+                return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
+            logger.exception("ListObjectsV2 failed")
+            return _s3_error(500, "InternalError", str(e))
         except Exception as e:
             logger.exception("ListObjectsV2 failed")
             return _s3_error(500, "InternalError", str(e))
@@ -402,6 +415,12 @@ class S3Handler:
                     "Content-Length": "0",
                 },
             )
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                logger.warning("PutObject: bucket '%s' not found upstream", bucket)
+                return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
+            logger.exception("PutObject failed")
+            return _s3_error(500, "InternalError", str(e))
         except Exception as e:
             logger.exception("PutObject failed")
             return _s3_error(500, "InternalError", str(e))
@@ -443,6 +462,14 @@ class S3Handler:
                 "The specified source key does not exist.",
                 resource=copy_source,
             )
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                logger.warning("CopyObject: bucket not found upstream")
+                return _s3_error(
+                    404, "NoSuchBucket", "The specified bucket does not exist."
+                )
+            logger.exception("CopyObject failed")
+            return _s3_error(500, "InternalError", str(e))
         except Exception as e:
             logger.exception("CopyObject failed")
             return _s3_error(500, "InternalError", str(e))
@@ -539,6 +566,12 @@ class S3Handler:
         except (ConnectionResetError, ConnectionError):
             logger.debug("GetObject: client disconnected for /%s/%s", bucket, key)
             return web.Response(status=499)  # nginx-style "client closed request"
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                logger.warning("GetObject: bucket '%s' not found upstream", bucket)
+                return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
+            logger.exception("GetObject failed")
+            return _s3_error(500, "InternalError", str(e))
         except Exception as e:
             logger.exception("GetObject failed")
             return _s3_error(500, "InternalError", str(e))
@@ -549,6 +582,12 @@ class S3Handler:
         try:
             await self.bridge.delete_object(bucket, key)
             return web.Response(status=204)
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                logger.warning("DeleteObject: bucket '%s' not found upstream", bucket)
+                return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
+            logger.exception("DeleteObject failed")
+            return _s3_error(500, "InternalError", str(e))
         except Exception as e:
             logger.exception("DeleteObject failed")
             return _s3_error(500, "InternalError", str(e))
@@ -599,6 +638,12 @@ class S3Handler:
                     "Last-Modified": last_modified,
                 },
             )
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                logger.warning("HeadObject: bucket '%s' not found upstream", bucket)
+                return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
+            logger.exception("HeadObject failed")
+            return _s3_error(500, "InternalError", str(e))
         except Exception as e:
             logger.exception("HeadObject failed")
             return _s3_error(500, "InternalError", str(e))
@@ -800,6 +845,14 @@ class S3Handler:
                 event.set()
                 raise
 
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                logger.warning(
+                    "CompleteMultipartUpload: bucket '%s' not found upstream", bucket
+                )
+                return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
+            logger.exception("CompleteMultipartUpload failed")
+            return _s3_error(500, "InternalError", str(e))
         except Exception as e:
             logger.exception("CompleteMultipartUpload failed")
             return _s3_error(500, "InternalError", str(e))
