@@ -21,7 +21,7 @@ from xml.etree.ElementTree import fromstring
 import aiohttp
 from aiohttp import web
 
-from hugbucket.core.backend import StorageBackend
+from hugbucket.bridge import HFStorageBackend
 from hugbucket.s3.xml_responses import (
     list_buckets_xml,
     list_objects_v2_xml,
@@ -96,7 +96,7 @@ class S3Handler:
 
     def __init__(
         self,
-        bridge: StorageBackend,
+        bridge: HFStorageBackend,
         multipart_upload_ttl: int = 86400,
     ) -> None:
         self.bridge = bridge
@@ -563,7 +563,7 @@ class S3Handler:
 
             await response.write_eof()
             return response
-        except (ConnectionResetError, ConnectionError):
+        except ConnectionResetError, ConnectionError:
             logger.debug("GetObject: client disconnected for /%s/%s", bucket, key)
             return web.Response(status=499)  # nginx-style "client closed request"
         except aiohttp.ClientResponseError as e:

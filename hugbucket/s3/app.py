@@ -7,8 +7,8 @@ import sys
 
 from aiohttp import web
 
+from hugbucket.bridge import HFStorageBackend
 from hugbucket.config import Config
-from hugbucket.core.backend import StorageBackend
 from hugbucket.s3.auth import s3_auth_middleware
 from hugbucket.s3.server import S3Handler
 
@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 def create_s3_app(
     *,
     config: Config,
-    backend: StorageBackend,
+    backend: HFStorageBackend,
     max_upload_bytes: int = 1024 * 1024 * 1024,
 ) -> web.Application:
-    """Create an aiohttp app serving the S3 protocol adapter."""
+    """Create an aiohttp app serving the S3 gateway."""
     handler = S3Handler(
         backend,
         multipart_upload_ttl=config.multipart_upload_ttl,
