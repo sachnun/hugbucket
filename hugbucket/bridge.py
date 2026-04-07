@@ -1,6 +1,6 @@
 """Bridge: orchestrates S3 operations via HF Hub + Xet CAS.
 
-This is the core translation layer that maps high-level operations
+This is the core translation layer that maps S3 operations
 (put object, get object) to the multi-step HF/Xet protocol.
 """
 
@@ -15,7 +15,6 @@ import mimetypes
 import time
 from dataclasses import dataclass, field
 
-from hugbucket.core.backend import StorageBackend
 from hugbucket.config import Config
 from hugbucket.hub.client import HubClient, BucketInfo, BucketFile, XetConnectionInfo
 from hugbucket.xet.cas_client import CASClient, Reconstruction, ReconstructionTerm
@@ -239,7 +238,7 @@ class _XorbCache:
 
 
 @dataclass
-class HFStorageBackend(StorageBackend):
+class HFStorageBackend:
     """Orchestrates S3 <-> HF Bucket operations."""
 
     config: Config

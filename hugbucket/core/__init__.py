@@ -1,6 +1,5 @@
-"""Protocol-agnostic core interfaces for storage backends."""
+"""Core data models."""
 
-from hugbucket.core.backend import StorageBackend
 from hugbucket.core.models import BucketFile, BucketInfo
 
-__all__ = ["StorageBackend", "BucketFile", "BucketInfo"]
+__all__ = ["BucketFile", "BucketInfo"]

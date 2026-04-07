@@ -1,4 +1,4 @@
-"""Protocol-agnostic data models shared across adapters/providers."""
+"""Core data models."""
 
 from __future__ import annotations
 
