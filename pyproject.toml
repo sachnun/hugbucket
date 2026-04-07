@@ -1,7 +1,7 @@
 [project]
 name = "hugbucket"
 version = "0.1.0"
-description = "S3-compatible gateway for Hugging Face Storage Buckets (pure Xet implementation)"
+description = "S3-compatible gateway for Hugging Face Storage Buckets"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -9,14 +9,10 @@ dependencies = [
     "awscli>=1.44.55",
     "blake3>=1.0",
     "lz4>=4.3",
-    "pyftpdlib>=2.1.0",
 ]
 
 [project.scripts]
 hugbucket = "hugbucket.main:main"
-hugbucket-s3 = "hugbucket.apps.s3:main"
-hugbucket-ftp = "hugbucket.apps.ftp:main"
-hugbucket-webdav = "hugbucket.apps.webdav:main"
 
 [dependency-groups]
 dev = [
