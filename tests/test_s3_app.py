@@ -1,45 +1,32 @@
-"""Tests for S3 app entrypoint mode and startup wiring."""
+"""Tests for S3 app entrypoint startup wiring."""
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from hugbucket.apps import s3 as s3_app
 
 
-def test_s3_main_requires_mode(monkeypatch) -> None:
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
-    monkeypatch.delenv("MODE", raising=False)
-    monkeypatch.setattr(s3_app.sys, "argv", ["hugbucket-s3"])
+def test_s3_main_requires_hf_token(monkeypatch) -> None:
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(s3_app.sys, "argv", ["hugbucket"])
+
+    import pytest
 
     with pytest.raises(SystemExit) as exc:
         s3_app.main()
 
-    assert exc.value.code == 2
+    assert exc.value.code == 1
 
 
-def test_s3_main_rejects_wrong_mode(monkeypatch) -> None:
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
-    monkeypatch.setenv("MODE", "ftp")
-    monkeypatch.setattr(s3_app.sys, "argv", ["hugbucket-s3"])
-
-    with pytest.raises(SystemExit) as exc:
-        s3_app.main()
-
-    assert exc.value.code == 2
-
-
-def test_s3_main_starts_with_s3_mode(monkeypatch) -> None:
+def test_s3_main_starts(monkeypatch) -> None:
     seen = {}
 
     class _FakeApp(dict):
         pass
 
     monkeypatch.setenv("HF_TOKEN", "hf_test")
-    monkeypatch.setenv("MODE", "s3")
-    monkeypatch.setattr(s3_app.sys, "argv", ["hugbucket-s3"])
+    monkeypatch.setattr(s3_app.sys, "argv", ["hugbucket"])
 
     backend = MagicMock()
     monkeypatch.setattr(
@@ -48,7 +35,7 @@ def test_s3_main_starts_with_s3_mode(monkeypatch) -> None:
         lambda config: backend,
     )
 
-    def _create_app(*, config, backend, max_upload_bytes):  # type: ignore[no-untyped-def]
+    def _create_app(*, config, backend, max_upload_bytes):
         seen["config"] = config
         seen["backend"] = backend
         seen["max_upload_bytes"] = max_upload_bytes
@@ -56,7 +43,7 @@ def test_s3_main_starts_with_s3_mode(monkeypatch) -> None:
 
     monkeypatch.setattr(s3_app, "create_s3_app", _create_app)
 
-    def _run_app(app, host, port, print=None):  # type: ignore[no-untyped-def]
+    def _run_app(app, host, port, print=None):
         seen["run"] = (app, host, port, print)
 
     monkeypatch.setattr(s3_app.web, "run_app", _run_app)

@@ -11,23 +11,6 @@ class Config:
     port: int = 9000
     region: str = "us-east-1"
 
-    # FTP gateway settings
-    ftp_host: str = "0.0.0.0"
-    ftp_port: int = 2121
-    ftp_user: str = field(default_factory=lambda: os.environ.get("FTP_USERNAME", ""))
-    ftp_password: str = field(
-        default_factory=lambda: os.environ.get("FTP_PASSWORD", "")
-    )
-
-    # WebDAV gateway settings
-    webdav_host: str = "0.0.0.0"
-    webdav_port: int = 8080
-    webdav_user: str = field(
-        default_factory=lambda: os.environ.get("WEBDAV_USERNAME", "")
-    )
-    webdav_password: str = field(
-        default_factory=lambda: os.environ.get("WEBDAV_PASSWORD", "")
-    )
     # HF Hub settings
     hf_endpoint: str = "https://huggingface.co"
     hf_token: str = field(default_factory=lambda: os.environ.get("HF_TOKEN", ""))
