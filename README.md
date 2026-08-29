@@ -1,3 +1,5 @@
+> **Deprecated:** This repository is no longer maintained. Use [Hugging Face S3-compatible Storage Buckets](https://github.com/huggingface/hub-docs/blob/main/docs/hub/storage-buckets-s3.md) instead.
+
 # HugBucket
 
 S3-compatible gateway for Hugging Face Storage Buckets.
